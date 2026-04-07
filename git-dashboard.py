@@ -9,7 +9,16 @@ find the one curly quote that got straightened.
 
 Usage:
     python3 git-dashboard.py [path-to-repo]
-    
+    python3 git-dashboard.py --range HEAD~3..HEAD [path-to-repo]
+    python3 git-dashboard.py --range HEAD~3 [path-to-repo]
+
+Options:
+    --range <spec>   Show diffs for a commit range instead of working tree.
+                     Two-dot range (HEAD~3..HEAD) shows committed changes only.
+                     Single ref (HEAD~3) or open-ended (HEAD~3..) includes
+                     uncommitted working tree changes as well.
+    --help, -h       Show this help message and exit.
+
 Opens in default browser automatically on macOS.
 """
 
@@ -355,15 +364,54 @@ def parse_and_render_diff(diff_text, diff_label):
 
 # ─── HTML Generation ────────────────────────────────────────────────
 
-def generate_html(info, repo_path):
+def parse_diff_stat(stat_output):
+    """Parse the summary line of git diff --stat. Returns (files, insertions, deletions)."""
+    # e.g. " 3 files changed, 10 insertions(+), 2 deletions(-)"
+    files = insertions = deletions = 0
+    if not stat_output:
+        return files, insertions, deletions
+    summary = stat_output.strip().splitlines()[-1]
+    m = re.search(r'(\d+) file', summary)
+    if m:
+        files = int(m.group(1))
+    m = re.search(r'(\d+) insertion', summary)
+    if m:
+        insertions = int(m.group(1))
+    m = re.search(r'(\d+) deletion', summary)
+    if m:
+        deletions = int(m.group(1))
+    return files, insertions, deletions
+
+
+def generate_html(info, repo_path, range_spec=None):
     """Generate the complete dashboard HTML."""
 
-    # Get raw diffs
-    staged_diff = run_git(["diff", "--cached"], repo_path)
-    unstaged_diff = run_git(["diff"], repo_path)
+    # Get raw diffs — range mode vs working tree mode
+    is_range = range_spec is not None
+    range_diff_html = ""
+    range_files = range_insertions = range_deletions = 0
+    staged_diff_html = ""
+    unstaged_diff_html = ""
 
-    staged_diff_html = parse_and_render_diff(staged_diff, "staged")
-    unstaged_diff_html = parse_and_render_diff(unstaged_diff, "unstaged")
+    if is_range:
+        # Determine if this is a two-dot committed range or open-ended (includes working tree)
+        if ".." in range_spec:
+            # Two-dot range: committed changes only
+            range_diff = run_git(["diff", range_spec], repo_path)
+            range_stat = run_git(["diff", "--stat", range_spec], repo_path)
+            range_label = range_spec
+        else:
+            # Single ref: diff from that ref to working tree
+            range_diff = run_git(["diff", range_spec], repo_path)
+            range_stat = run_git(["diff", "--stat", range_spec], repo_path)
+            range_label = f"{range_spec}..working tree"
+        range_diff_html = parse_and_render_diff(range_diff, "range")
+        range_files, range_insertions, range_deletions = parse_diff_stat(range_stat)
+    else:
+        staged_diff = run_git(["diff", "--cached"], repo_path)
+        unstaged_diff = run_git(["diff"], repo_path)
+        staged_diff_html = parse_and_render_diff(staged_diff, "staged")
+        unstaged_diff_html = parse_and_render_diff(unstaged_diff, "unstaged")
 
     def zero_class(n):
         return " zero" if n == 0 else ""
@@ -418,16 +466,35 @@ def generate_html(info, repo_path):
             f'</div>\n'
         )
 
-    # Diff section — sequential, no tabs
+    # Diff section — range mode or working tree mode
+    diff_legend = (
+        '<div class="diff-legend">'
+        '<span class="legend-item"><mark class="wadd">added text</mark> Changed words (new)</span>'
+        '<span class="legend-item"><mark class="wdel">removed text</mark> Changed words (old)</span>'
+        '<span class="legend-item"><span class="legend-swatch swatch-add"></span> Added line</span>'
+        '<span class="legend-item"><span class="legend-swatch swatch-del"></span> Removed line</span>'
+        '</div>\n'
+    )
+
     diff_section = ""
-    if staged_diff_html or unstaged_diff_html:
+    if is_range:
+        if range_diff_html:
+            diff_section = f'<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — {escape(range_label)}</div>\n'
+            diff_section += diff_legend
+            diff_section += '<div class="panel-body diff-scroll">\n'
+            diff_section += f'<div class="diff-section-label">{range_files} file{"s" if range_files != 1 else ""} changed, +{range_insertions} −{range_deletions}</div>\n'
+            diff_section += range_diff_html + "\n"
+            diff_section += '</div></div>\n'
+        else:
+            diff_section = (
+                '<div class="panel panel-full">'
+                f'<div class="panel-header">🔍 Diff Viewer — {escape(range_label)}</div>'
+                '<div class="panel-body"><div class="panel-empty">No changes in this range</div></div>'
+                '</div>'
+            )
+    elif staged_diff_html or unstaged_diff_html:
         diff_section = '<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — Word-Level Change Detection</div>\n'
-        diff_section += '<div class="diff-legend">'
-        diff_section += '<span class="legend-item"><mark class="wadd">added text</mark> Changed words (new)</span>'
-        diff_section += '<span class="legend-item"><mark class="wdel">removed text</mark> Changed words (old)</span>'
-        diff_section += '<span class="legend-item"><span class="legend-swatch swatch-add"></span> Added line</span>'
-        diff_section += '<span class="legend-item"><span class="legend-swatch swatch-del"></span> Removed line</span>'
-        diff_section += '</div>\n'
+        diff_section += diff_legend
         diff_section += '<div class="panel-body diff-scroll">\n'
 
         if staged_diff_html:
@@ -449,6 +516,52 @@ def generate_html(info, repo_path):
             '<div class="panel-body"><div class="panel-empty">No uncommitted changes to diff</div></div>'
             '</div>'
         )
+
+    # Stats row — different cards for range vs working tree mode
+    if is_range:
+        stats_row_html = f'''
+    <div class="stat-card modified">
+      <div class="stat-label">Files Changed</div>
+      <div class="stat-value{zero_class(range_files)}">{range_files}</div>
+      <div class="stat-detail">In {escape(range_label)}</div>
+    </div>
+    <div class="stat-card staged">
+      <div class="stat-label">Insertions</div>
+      <div class="stat-value{zero_class(range_insertions)}">+{range_insertions}</div>
+      <div class="stat-detail">Lines added</div>
+    </div>
+    <div class="stat-card untracked">
+      <div class="stat-label">Deletions</div>
+      <div class="stat-value{zero_class(range_deletions)}">−{range_deletions}</div>
+      <div class="stat-detail">Lines removed</div>
+    </div>
+    <div class="stat-card stash">
+      <div class="stat-label">Stashes</div>
+      <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
+      <div class="stat-detail">Saved for later</div>
+    </div>'''
+    else:
+        stats_row_html = f'''
+    <div class="stat-card staged">
+      <div class="stat-label">Staged</div>
+      <div class="stat-value{zero_class(staged_count)}">{staged_count}</div>
+      <div class="stat-detail">Ready to commit</div>
+    </div>
+    <div class="stat-card modified">
+      <div class="stat-label">Modified</div>
+      <div class="stat-value{zero_class(modified_count)}">{modified_count}</div>
+      <div class="stat-detail">Unstaged changes</div>
+    </div>
+    <div class="stat-card untracked">
+      <div class="stat-label">Untracked</div>
+      <div class="stat-value{zero_class(untracked_count)}">{untracked_count}</div>
+      <div class="stat-detail">New files</div>
+    </div>
+    <div class="stat-card stash">
+      <div class="stat-label">Stashes</div>
+      <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
+      <div class="stat-detail">Saved for later</div>
+    </div>'''
 
     now = datetime.now().strftime("%B %d, %Y at %I:%M:%S %p")
 
@@ -842,6 +955,7 @@ def generate_html(info, repo_path):
   }}
   .pill-staged {{ background: var(--green-bg); color: var(--green); }}
   .pill-unstaged {{ background: var(--yellow-bg); color: var(--yellow); }}
+  .pill-range {{ background: rgba(88,166,255,0.1); color: var(--accent); }}
 
   .diff-content {{
     border: 1px solid var(--border);
@@ -928,26 +1042,7 @@ def generate_html(info, repo_path):
   </div>
 
   <div class="stats-row">
-    <div class="stat-card staged">
-      <div class="stat-label">Staged</div>
-      <div class="stat-value{zero_class(staged_count)}">{staged_count}</div>
-      <div class="stat-detail">Ready to commit</div>
-    </div>
-    <div class="stat-card modified">
-      <div class="stat-label">Modified</div>
-      <div class="stat-value{zero_class(modified_count)}">{modified_count}</div>
-      <div class="stat-detail">Unstaged changes</div>
-    </div>
-    <div class="stat-card untracked">
-      <div class="stat-label">Untracked</div>
-      <div class="stat-value{zero_class(untracked_count)}">{untracked_count}</div>
-      <div class="stat-detail">New files</div>
-    </div>
-    <div class="stat-card stash">
-      <div class="stat-label">Stashes</div>
-      <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
-      <div class="stat-detail">Saved for later</div>
-    </div>
+    {stats_row_html}
   </div>
 
   <div class="panels">
@@ -984,8 +1079,42 @@ def generate_html(info, repo_path):
 
 # ─── Main ───────────────────────────────────────────────────────────
 
+HELP_TEXT = __doc__.strip()
+
+
+def parse_args(argv):
+    """Parse command-line arguments. Returns (range_spec, path)."""
+    args = argv[1:]  # skip script name
+
+    if not args:
+        return None, "."
+
+    if args[0] in ("--help", "-h"):
+        print(HELP_TEXT)
+        sys.exit(0)
+
+    range_spec = None
+    path = "."
+
+    if args[0] == "--range":
+        if len(args) < 2:
+            print("Error: --range requires an argument (e.g. HEAD~3..HEAD)")
+            sys.exit(1)
+        range_spec = args[1]
+        # Normalize open-ended: "HEAD~3.." → "HEAD~3"
+        if range_spec.endswith(".."):
+            range_spec = range_spec[:-2]
+        if len(args) > 2:
+            path = args[2]
+    else:
+        path = args[0]
+
+    return range_spec, os.path.abspath(path)
+
+
 def main():
-    start_path = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else ".")
+    range_spec, start_path = parse_args(sys.argv)
+    start_path = os.path.abspath(start_path)
 
     # Resolve to repo root from wherever we are inside the checkout
     result = subprocess.run(
@@ -998,9 +1127,12 @@ def main():
 
     repo_path = result.stdout.strip()
 
-    print(f"Scanning {repo_path}...")
+    if range_spec:
+        print(f"Scanning {repo_path} (range: {range_spec})...")
+    else:
+        print(f"Scanning {repo_path}...")
     info = collect_repo_info(repo_path)
-    html = generate_html(info, repo_path)
+    html = generate_html(info, repo_path, range_spec=range_spec)
 
     safe_name = re.sub(r'[^\w\-]', '-', info["repo_name"]).strip('-')
     output_path = f"/tmp/{safe_name}-git-dashboard.html"
