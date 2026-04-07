@@ -244,9 +244,7 @@ def pair_changed_lines(removed_lines, added_lines):
             j = matched_pairs[i]
             while new_idx < j:
                 if new_idx not in used_new:
-                    # Check: is this new_idx used as a match target?
-                    pass
-                pairs.append((None, added_lines[new_idx]))
+                    pairs.append((None, added_lines[new_idx]))
                 new_idx += 1
             pairs.append((removed_lines[i], added_lines[j]))
             new_idx = j + 1
