@@ -940,6 +940,15 @@ def generate_html(info, repo_path, range_spec=None):
     display: flex;
     align-items: center;
     gap: 8px;
+    position: relative;
+    overflow: hidden;
+  }}
+  .diff-file-header::before {{
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: var(--accent);
   }}
   .diff-file-header:hover {{ background: #1f2e40; }}
   .diff-file[open] > .diff-file-header {{ border-radius: 6px 6px 0 0; }}
