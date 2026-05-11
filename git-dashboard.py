@@ -11,12 +11,16 @@ Usage:
     python3 git-dashboard.py [path-to-repo]
     python3 git-dashboard.py --range HEAD~3..HEAD [path-to-repo]
     python3 git-dashboard.py --range HEAD~3 [path-to-repo]
+    python3 git-dashboard.py --watch [path-to-repo]
 
 Options:
     --range <spec>   Show diffs for a commit range instead of working tree.
                      Two-dot range (HEAD~3..HEAD) shows committed changes only.
                      Single ref (HEAD~3) or open-ended (HEAD~3..) includes
                      uncommitted working tree changes as well.
+    --watch          Run a local server that auto-refreshes the dashboard
+                     when the repo changes. Picks a free port, opens the
+                     browser, prints the URL. Ctrl-C to stop.
     --help, -h       Show this help message and exit.
 
 Opens in default browser automatically on macOS.
@@ -27,10 +31,19 @@ import sys
 import os
 import re
 import webbrowser
+import hashlib
+import queue
+import threading
 from datetime import datetime
 from difflib import SequenceMatcher
 from html import escape
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+
+# Polling interval for --watch mode. Trades responsiveness for fewer git
+# invocations; 5s is the sweet spot for a "glance while you code" tool.
+POLL_INTERVAL_SECONDS = 5
 
 
 # ─── Git Data Collection ────────────────────────────────────────────
@@ -1086,26 +1099,240 @@ def generate_html(info, repo_path, range_spec=None):
     return html
 
 
+# ─── Watch Mode Server ──────────────────────────────────────────────
+
+def compute_state_hash(repo_path):
+    """
+    Cheap fingerprint of "everything the dashboard cares about."
+
+    Combines working-tree state (status --porcelain) with the current commit
+    SHA (rev-parse HEAD). Working tree alone misses commits/amends/resets on
+    a clean tree; HEAD alone misses unstaged edits. Together they cover both.
+    """
+    status = run_git(["status", "--porcelain"], repo_path)
+    head = run_git(["rev-parse", "HEAD"], repo_path)
+    return hashlib.sha1(f"{status}|{head}".encode()).hexdigest()
+
+
+def inject_watch_script(html):
+    """Splice the SSE auto-reload client into the dashboard HTML."""
+    script = """<script>
+(function() {
+  // Restore scroll position from before the reload
+  var saved = sessionStorage.getItem('git-dashboard-scroll');
+  if (saved !== null) {
+    window.scrollTo(0, parseInt(saved, 10));
+    sessionStorage.removeItem('git-dashboard-scroll');
+  }
+  var es = new EventSource('/events');
+  es.onmessage = function(e) {
+    if (e.data === 'refresh') {
+      sessionStorage.setItem('git-dashboard-scroll', window.scrollY);
+      location.reload();
+    }
+  };
+})();
+</script>
+</body>"""
+    return html.replace("</body>", script, 1)
+
+
+class WatchState:
+    """Shared state between the HTTP server, SSE clients, and polling thread."""
+
+    def __init__(self, repo_path, range_spec):
+        self.repo_path = repo_path
+        self.range_spec = range_spec
+        self.html = b""
+        self.html_lock = threading.Lock()
+        self.clients = []           # list of queue.Queue, one per SSE client
+        self.clients_lock = threading.Lock()
+        self.last_hash = None
+        self.shutdown_event = threading.Event()
+
+    def regenerate(self):
+        """Rebuild the dashboard HTML from current repo state."""
+        info = collect_repo_info(self.repo_path)
+        html = generate_html(info, self.repo_path, range_spec=self.range_spec)
+        html = inject_watch_script(html)
+        with self.html_lock:
+            self.html = html.encode("utf-8")
+
+    def get_html(self):
+        with self.html_lock:
+            return self.html
+
+    def add_client(self):
+        q = queue.Queue()
+        with self.clients_lock:
+            self.clients.append(q)
+        return q
+
+    def remove_client(self, q):
+        with self.clients_lock:
+            if q in self.clients:
+                self.clients.remove(q)
+
+    def broadcast(self, message):
+        """Send a message to every connected SSE client."""
+        with self.clients_lock:
+            targets = list(self.clients)
+        for q in targets:
+            q.put(message)
+
+
+def poll_loop(state):
+    """
+    Background thread: every POLL_INTERVAL_SECONDS, recompute the state hash.
+    If it changed, regenerate the HTML and tell every browser tab to reload.
+    """
+    while not state.shutdown_event.is_set():
+        try:
+            current_hash = compute_state_hash(state.repo_path)
+            if current_hash != state.last_hash:
+                state.last_hash = current_hash
+                state.regenerate()
+                state.broadcast("refresh")
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"[{timestamp}] Refreshed", flush=True)
+        except Exception as e:
+            sys.stderr.write(f"poll error: {e}\n")
+        # Sleep, but wake immediately on shutdown
+        state.shutdown_event.wait(POLL_INTERVAL_SECONDS)
+
+
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """
+    Like ThreadingHTTPServer, but doesn't dump a traceback every time a
+    browser closes a connection — that happens routinely (speculative
+    connections, SSE teardown on reload) and isn't something we can or
+    should fix from the client side.
+    """
+
+    def handle_error(self, request, client_address):
+        exc_type = sys.exc_info()[0]
+        if exc_type is not None and issubclass(
+            exc_type, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)
+        ):
+            return  # Normal client disconnect; not worth logging.
+        super().handle_error(request, client_address)
+
+
+def make_request_handler(state):
+    """Build a BaseHTTPRequestHandler subclass bound to a WatchState."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            # Suppress per-request access logging; the refresh prints suffice.
+            pass
+
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                self._serve_dashboard()
+            elif self.path == "/events":
+                self._serve_events()
+            else:
+                self.send_error(404)
+
+        def _serve_dashboard(self):
+            body = state.get_html()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _serve_events(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            q = state.add_client()
+            try:
+                # Initial comment confirms the SSE stream is alive
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+                while not state.shutdown_event.is_set():
+                    try:
+                        msg = q.get(timeout=30)
+                    except queue.Empty:
+                        msg = "__keepalive__"
+                    if msg == "__shutdown__":
+                        break
+                    if msg == "__keepalive__":
+                        self.wfile.write(b": keepalive\n\n")
+                    else:
+                        self.wfile.write(f"data: {msg}\n\n".encode())
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # Browser tab closed; nothing to clean up beyond removal.
+            finally:
+                state.remove_client(q)
+
+    return Handler
+
+
+def serve_watch(repo_path, range_spec):
+    """Run the watch server until the user hits Ctrl-C."""
+    state = WatchState(repo_path, range_spec)
+
+    print(f"Scanning {repo_path}...", flush=True)
+    state.last_hash = compute_state_hash(repo_path)
+    state.regenerate()
+
+    handler = make_request_handler(state)
+    server = QuietThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    url = f"http://127.0.0.1:{port}/"
+
+    poll_thread = threading.Thread(target=poll_loop, args=(state,), daemon=True)
+    poll_thread.start()
+
+    print(f"Dashboard: {url}", flush=True)
+    print(f"Watching for changes (polling every {POLL_INTERVAL_SECONDS}s) — Ctrl-C to stop.", flush=True)
+    webbrowser.open(url)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping...", flush=True)
+    finally:
+        state.shutdown_event.set()
+        # Wake any SSE client threads blocked on their queue
+        with state.clients_lock:
+            for q in state.clients:
+                q.put("__shutdown__")
+        server.shutdown()
+        server.server_close()
+
+
 # ─── Main ───────────────────────────────────────────────────────────
 
 HELP_TEXT = __doc__.strip()
 
 
 def parse_args(argv):
-    """Parse command-line arguments. Returns (range_spec, path)."""
+    """Parse command-line arguments. Returns (range_spec, path, watch)."""
     args = argv[1:]  # skip script name
 
     if not args:
-        return None, "."
+        return None, ".", False
 
     if args[0] in ("--help", "-h"):
         print(HELP_TEXT)
         sys.exit(0)
 
+    # --watch can appear anywhere; pull it out before positional parsing.
+    watch = "--watch" in args
+    if watch:
+        args = [a for a in args if a != "--watch"]
+
     range_spec = None
     path = "."
 
-    if args[0] == "--range":
+    if args and args[0] == "--range":
         if len(args) < 2:
             print("Error: --range requires an argument (e.g. HEAD~3..HEAD)")
             sys.exit(1)
@@ -1115,14 +1342,14 @@ def parse_args(argv):
             range_spec = range_spec[:-2]
         if len(args) > 2:
             path = args[2]
-    else:
+    elif args:
         path = args[0]
 
-    return range_spec, os.path.abspath(path)
+    return range_spec, os.path.abspath(path), watch
 
 
 def main():
-    range_spec, start_path = parse_args(sys.argv)
+    range_spec, start_path, watch = parse_args(sys.argv)
     start_path = os.path.abspath(start_path)
 
     # Resolve to repo root from wherever we are inside the checkout
@@ -1135,6 +1362,10 @@ def main():
         sys.exit(1)
 
     repo_path = result.stdout.strip()
+
+    if watch:
+        serve_watch(repo_path, range_spec)
+        return
 
     if range_spec:
         print(f"Scanning {repo_path} (range: {range_spec})...")
