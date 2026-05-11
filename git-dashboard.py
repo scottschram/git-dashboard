@@ -434,11 +434,20 @@ def generate_html(info, repo_path, range_spec=None):
     untracked_count = len(info["untracked_files"])
 
     # Build file status HTML
+    def status_badge(line, default_label, default_class):
+        # name-status lines start with a status code (M, A, D, R100, ...) + tab
+        code = line[:1]
+        if code == "D":
+            return "deleted", "badge-deleted"
+        return default_label, default_class
+
     file_status_html = ""
     for line in (info["staged_status"].splitlines() if info["staged_status"] else []):
-        file_status_html += f'<div class="file-entry"><span class="file-badge badge-staged">staged</span> {escape(line)}</div>\n'
+        label, cls = status_badge(line, "staged", "badge-staged")
+        file_status_html += f'<div class="file-entry"><span class="file-badge {cls}">{label}</span> {escape(line)}</div>\n'
     for line in (info["modified_status"].splitlines() if info["modified_status"] else []):
-        file_status_html += f'<div class="file-entry"><span class="file-badge badge-modified">modified</span> {escape(line)}</div>\n'
+        label, cls = status_badge(line, "modified", "badge-modified")
+        file_status_html += f'<div class="file-entry"><span class="file-badge {cls}">{label}</span> {escape(line)}</div>\n'
     for f in info["untracked_files"]:
         file_status_html += f'<div class="file-entry"><span class="file-badge badge-untracked">untracked</span> {escape(f)}</div>\n'
 
@@ -806,6 +815,7 @@ def generate_html(info, repo_path, range_spec=None):
   }}
   .badge-staged {{ background: var(--green-bg); color: var(--green); }}
   .badge-modified {{ background: var(--yellow-bg); color: var(--yellow); }}
+  .badge-deleted {{ background: var(--red-bg); color: var(--red); }}
   .badge-untracked {{ background: rgba(188,140,255,0.1); color: var(--purple); }}
 
   /* ── Commit Log ── */
