@@ -1120,13 +1120,18 @@ def compute_state_hash(repo_path):
     be invisible. Folding in full diff output (working tree + index) catches
     content edits. `diff --raw` looks cheaper but uses 0000000 for unstaged
     post-image SHAs, so it can't distinguish successive edits.
+
+    The upstream ref is included so a push (which moves the remote-tracking
+    branch but touches neither HEAD nor the working tree) triggers a refresh —
+    otherwise the dashboard keeps showing the just-pushed commits as unpushed.
     """
     status = run_git(["status", "--porcelain"], repo_path)
     head = run_git(["rev-parse", "HEAD"], repo_path)
+    upstream = run_git(["rev-parse", "@{upstream}"], repo_path)
     unstaged = run_git(["diff"], repo_path)
     staged = run_git(["diff", "--cached"], repo_path)
     return hashlib.sha1(
-        f"{status}|{head}|{unstaged}|{staged}".encode()
+        f"{status}|{head}|{upstream}|{unstaged}|{staged}".encode()
     ).hexdigest()
 
 
