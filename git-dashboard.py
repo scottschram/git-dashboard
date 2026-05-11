@@ -1105,13 +1105,19 @@ def compute_state_hash(repo_path):
     """
     Cheap fingerprint of "everything the dashboard cares about."
 
-    Combines working-tree state (status --porcelain) with the current commit
-    SHA (rev-parse HEAD). Working tree alone misses commits/amends/resets on
-    a clean tree; HEAD alone misses unstaged edits. Together they cover both.
+    Porcelain status only flags whether a file is modified, not what changed
+    inside it — so repeated edits to an already-modified file would otherwise
+    be invisible. Folding in full diff output (working tree + index) catches
+    content edits. `diff --raw` looks cheaper but uses 0000000 for unstaged
+    post-image SHAs, so it can't distinguish successive edits.
     """
     status = run_git(["status", "--porcelain"], repo_path)
     head = run_git(["rev-parse", "HEAD"], repo_path)
-    return hashlib.sha1(f"{status}|{head}".encode()).hexdigest()
+    unstaged = run_git(["diff"], repo_path)
+    staged = run_git(["diff", "--cached"], repo_path)
+    return hashlib.sha1(
+        f"{status}|{head}|{unstaged}|{staged}".encode()
+    ).hexdigest()
 
 
 def inject_watch_script(html):
