@@ -18,7 +18,7 @@ This tool generates an HTML dashboard that highlights **exactly which words chan
 
 Leave `gd` open in a Terminal tab and a browser tab while you work with Claude Code or any other AI assistant. When the assistant edits a file, the dashboard auto-refreshes within seconds — you see exactly which words were added, removed, or changed.
 
-This collapses verification from *"carefully re-read the whole paragraph to confirm the AI did what I asked"* to "glance at the dashboard and confirm the colored words match your intent."
+This collapses verification from *"carefully re-read the whole paragraph to confirm the AI did what I asked"* to *"glance at the dashboard and confirm the colored words match your intent."*
 
 ## Install
 
