@@ -8,20 +8,23 @@ modified paragraphs. No more squinting at entire red/green paragraphs to
 find the one curly quote that got straightened.
 
 Usage:
-    python3 git-dashboard.py [path-to-repo]
-    python3 git-dashboard.py --range HEAD~3..HEAD [path-to-repo]
-    python3 git-dashboard.py --range HEAD~3 [path-to-repo]
-    python3 git-dashboard.py --watch [path-to-repo]
+    python3 git-dashboard.py [path-to-repo]                       # watch (default)
+    python3 git-dashboard.py --once [path-to-repo]                # one-shot snapshot
+    python3 git-dashboard.py --range HEAD~3..HEAD [path-to-repo]  # range (implies --once)
+    python3 git-dashboard.py --range HEAD~3 [path-to-repo]        # range + working tree
 
 Options:
     --range <spec>   Show diffs for a commit range instead of working tree.
                      Two-dot range (HEAD~3..HEAD) shows committed changes only.
                      Single ref (HEAD~3) or open-ended (HEAD~3..) includes
                      uncommitted working tree changes as well.
-    --watch          Run a local server that auto-refreshes the dashboard
-                     when the repo changes. Picks a free port, opens the
-                     browser, prints the URL. Ctrl-C to stop.
+                     Implies --once (history can't be meaningfully watched).
+    --once           One-shot mode: generate HTML, open browser, exit.
+                     Useful for scripts and CI. Default is watch mode.
     --help, -h       Show this help message and exit.
+
+Default behavior is watch mode: starts a local server, opens the browser,
+auto-refreshes when the repo changes. Ctrl-C to stop.
 
 Opens in default browser automatically on macOS.
 """
@@ -41,8 +44,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
-# Polling interval for --watch mode. Trades responsiveness for fewer git
-# invocations; 5s is the sweet spot for a "glance while you code" tool.
+# Polling interval for watch mode (the default). Trades responsiveness for
+# fewer git invocations; 5s is the sweet spot for a "glance while you code" tool.
 POLL_INTERVAL_SECONDS = 5
 
 
@@ -1335,20 +1338,24 @@ HELP_TEXT = __doc__.strip()
 
 
 def parse_args(argv):
-    """Parse command-line arguments. Returns (range_spec, path, watch)."""
+    """Parse command-line arguments. Returns (range_spec, path, once).
+
+    once=False means watch mode (the default); once=True means one-shot.
+    --range implies once=True since history can't be meaningfully watched.
+    """
     args = argv[1:]  # skip script name
 
     if not args:
-        return None, ".", False
+        return None, ".", False  # no flags → watch mode
 
     if args[0] in ("--help", "-h"):
         print(HELP_TEXT)
         sys.exit(0)
 
-    # --watch can appear anywhere; pull it out before positional parsing.
-    watch = "--watch" in args
-    if watch:
-        args = [a for a in args if a != "--watch"]
+    # --once can appear anywhere; pull it out before positional parsing.
+    once = "--once" in args
+    if once:
+        args = [a for a in args if a != "--once"]
 
     range_spec = None
     path = "."
@@ -1366,11 +1373,15 @@ def parse_args(argv):
     elif args:
         path = args[0]
 
-    return range_spec, os.path.abspath(path), watch
+    # --range implies --once (no point watching a fixed historical range).
+    if range_spec:
+        once = True
+
+    return range_spec, os.path.abspath(path), once
 
 
 def main():
-    range_spec, start_path, watch = parse_args(sys.argv)
+    range_spec, start_path, once = parse_args(sys.argv)
     start_path = os.path.abspath(start_path)
 
     # Resolve to repo root from wherever we are inside the checkout
@@ -1384,7 +1395,7 @@ def main():
 
     repo_path = result.stdout.strip()
 
-    if watch:
+    if not once:
         serve_watch(repo_path, range_spec)
         return
 
