@@ -577,6 +577,16 @@ def generate_html(info, repo_path, range_spec=None):
     else:
         repo_name_html = f'<div class="repo-name">{escape(info["repo_name"])}</div>'
 
+    # Branch pill — just the branch name, unless it tracks a non-obvious
+    # upstream (a fork's upstream, a differently-named remote branch, …), in
+    # which case show "branch → upstream" so the mismatch is visible.
+    branch = info["branch"]
+    tracking = info["tracking"]
+    if tracking and tracking != f"origin/{branch}":
+        branch_label = f"{branch} → {tracking}"
+    else:
+        branch_label = branch
+
     html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1004,7 +1014,7 @@ def generate_html(info, repo_path, range_spec=None):
       <div class="header-left">
         <div class="header-icon">⌥</div>
         {repo_name_html}
-        <span class="branch-pill">{escape(info["branch"])}</span>
+        <span class="branch-pill">{escape(branch_label)}</span>
       </div>
       <div class="header-right">
         Generated {now}
@@ -1012,8 +1022,6 @@ def generate_html(info, repo_path, range_spec=None):
     </div>
     <div class="header-info">
       <strong>Remote:</strong> {escape(info["remote_url"])}
-      &nbsp;&nbsp;·&nbsp;&nbsp;
-      <strong>Tracking:</strong> {escape(info["tracking"] or "none")}
       &nbsp;&nbsp;·&nbsp;&nbsp;
       <strong>Path:</strong> {escape(str(repo_path))}
     </div>
