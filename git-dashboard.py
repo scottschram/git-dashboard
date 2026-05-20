@@ -492,20 +492,10 @@ def generate_html(info, repo_path, range_spec=None):
         )
 
     # Diff section — range mode or working tree mode
-    diff_legend = (
-        '<div class="diff-legend">'
-        '<span class="legend-item"><mark class="wadd">added text</mark> Changed words (new)</span>'
-        '<span class="legend-item"><mark class="wdel">removed text</mark> Changed words (old)</span>'
-        '<span class="legend-item"><span class="legend-swatch swatch-add"></span> Added line</span>'
-        '<span class="legend-item"><span class="legend-swatch swatch-del"></span> Removed line</span>'
-        '</div>\n'
-    )
-
     diff_section = ""
     if is_range:
         if range_diff_html:
             diff_section = f'<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — {escape(range_label)}</div>\n'
-            diff_section += diff_legend
             diff_section += '<div class="panel-body diff-scroll">\n'
             diff_section += f'<div class="diff-section-label">{range_files} file{"s" if range_files != 1 else ""} changed, +{range_insertions} −{range_deletions}</div>\n'
             diff_section += range_diff_html + "\n"
@@ -519,7 +509,6 @@ def generate_html(info, repo_path, range_spec=None):
             )
     elif staged_diff_html or unstaged_diff_html:
         diff_section = '<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — Word-Level Change Detection</div>\n'
-        diff_section += diff_legend
         diff_section += '<div class="panel-body diff-scroll">\n'
 
         if staged_diff_html:
@@ -922,29 +911,6 @@ def generate_html(info, repo_path, range_spec=None):
     background: var(--border);
     margin: 20px 0;
   }}
-  .diff-legend {{
-    display: flex;
-    gap: 20px;
-    padding: 10px 20px;
-    border-bottom: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--text-dim);
-    flex-wrap: wrap;
-  }}
-  .legend-item {{
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }}
-  .legend-swatch {{
-    display: inline-block;
-    width: 14px;
-    height: 14px;
-    border-radius: 3px;
-  }}
-  .swatch-add {{ background: var(--green-bg); border-left: 3px solid var(--green); }}
-  .swatch-del {{ background: var(--red-bg); border-left: 3px solid var(--red); }}
-
   .diff-file {{ margin-bottom: 12px; }}
   .diff-file-header {{
     padding: 10px 14px;
