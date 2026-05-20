@@ -667,21 +667,6 @@ def generate_html(info, repo_path, range_spec=None):
     font-size: 13px;
     color: var(--text-dim);
   }}
-  .refresh-btn {{
-    display: inline-block;
-    margin-top: 6px;
-    padding: 6px 14px;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--accent);
-    font-size: 12px;
-    font-family: 'DM Sans', sans-serif;
-    cursor: pointer;
-    transition: background 0.15s;
-  }}
-  .refresh-btn:hover {{ background: var(--surface); }}
-
   /* ── Stats Row ── */
   .stats-row {{
     display: grid;
@@ -1029,8 +1014,7 @@ def generate_html(info, repo_path, range_spec=None):
       </div>
     </div>
     <div class="header-right">
-      Generated {now}<br>
-      <button class="refresh-btn" onclick="window.location.reload()">↻ Refresh</button>
+      Generated {now}
     </div>
   </div>
 
