@@ -920,8 +920,11 @@ def generate_html(info, repo_path, range_spec=None, live=False):
     color: var(--yellow);
   }}
   .sync-behind {{
-    background: var(--red-bg);
-    color: var(--red);
+    background: var(--red);
+    color: #fff;
+    font-weight: 700;
+    font-size: 12px;
+    padding: 3px 11px;
   }}
   .sync-ok {{
     background: var(--green-bg);
