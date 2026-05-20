@@ -542,50 +542,42 @@ def generate_html(info, repo_path, range_spec=None):
             '</div>'
         )
 
-    # Stats row — different cards for range vs working tree mode
+    # Stats row — compact horizontal cards; different set for range vs working tree
     if is_range:
         stats_row_html = f'''
     <div class="stat-card modified">
       <div class="stat-label">Files Changed</div>
       <div class="stat-value{zero_class(range_files)}">{range_files}</div>
-      <div class="stat-detail">In {escape(range_label)}</div>
     </div>
     <div class="stat-card staged">
       <div class="stat-label">Insertions</div>
       <div class="stat-value{zero_class(range_insertions)}">+{range_insertions}</div>
-      <div class="stat-detail">Lines added</div>
     </div>
     <div class="stat-card untracked">
       <div class="stat-label">Deletions</div>
       <div class="stat-value{zero_class(range_deletions)}">−{range_deletions}</div>
-      <div class="stat-detail">Lines removed</div>
     </div>
     <div class="stat-card stash">
       <div class="stat-label">Stashes</div>
       <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
-      <div class="stat-detail">Saved for later</div>
     </div>'''
     else:
         stats_row_html = f'''
     <div class="stat-card staged">
       <div class="stat-label">Staged</div>
       <div class="stat-value{zero_class(staged_count)}">{staged_count}</div>
-      <div class="stat-detail">Ready to commit</div>
     </div>
     <div class="stat-card modified">
       <div class="stat-label">Modified</div>
       <div class="stat-value{zero_class(modified_count)}">{modified_count}</div>
-      <div class="stat-detail">Unstaged changes</div>
     </div>
     <div class="stat-card untracked">
       <div class="stat-label">Untracked</div>
       <div class="stat-value{zero_class(untracked_count)}">{untracked_count}</div>
-      <div class="stat-detail">New files</div>
     </div>
     <div class="stat-card stash">
       <div class="stat-label">Stashes</div>
       <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
-      <div class="stat-detail">Saved for later</div>
     </div>'''
 
     now = datetime.now().strftime("%B %d, %Y at %I:%M:%S %p")
@@ -711,10 +703,14 @@ def generate_html(info, repo_path, range_spec=None):
   .stat-card {{
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 16px 20px;
+    border-radius: 8px;
+    padding: 9px 20px;
     position: relative;
     overflow: hidden;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
   }}
   .stat-card::before {{
     content: '';
@@ -732,24 +728,20 @@ def generate_html(info, repo_path, range_spec=None):
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: var(--text-dim);
-    margin-bottom: 6px;
+    color: var(--text);
   }}
   .stat-value {{
-    font-size: 28px;
+    font-size: 16px;
     font-weight: 700;
     font-family: 'JetBrains Mono', monospace;
     color: var(--text-bright);
   }}
-  .stat-detail {{
-    font-size: 12px;
-    color: var(--text-dim);
-    margin-top: 4px;
-  }}
-  .stat-value.sync-ok {{ color: var(--green); }}
-  .stat-value.sync-warn {{ color: var(--yellow); }}
-  .stat-value.sync-danger {{ color: var(--red); }}
-  .stat-value.zero {{ color: var(--text-dim); opacity: 0.5; }}
+  /* Non-zero numerals take the card's key color; zero stays a neutral white. */
+  .stat-card.staged .stat-value {{ color: var(--green); }}
+  .stat-card.modified .stat-value {{ color: var(--yellow); }}
+  .stat-card.untracked .stat-value {{ color: var(--purple); }}
+  .stat-card.stash .stat-value {{ color: var(--orange); }}
+  .stat-card .stat-value.zero {{ color: var(--text-bright); font-weight: 400; }}
 
   /* ── Panels ── */
   .panels {{
