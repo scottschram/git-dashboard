@@ -73,17 +73,23 @@ The one-shot modes (`--once`, `--range`) write the dashboard HTML to `/tmp/<repo
 - Full diff of all changes, with **word-level highlighting** of additions, deletions, and substitutions within modified lines
 - In `--range` mode: the same diff view, but for committed history rather than the working tree
 
-## Opening files in Finder
+## Opening Finder and Terminal
 
 In watch mode the header and the changed-file list are interactive:
 
 - **Click the Path** in the header to open the repository folder in Finder.
+- **Click the 🖥️ icon** next to the Path to open a terminal at the repository
+  root — handy for running project scripts like `bin/verify deploy`.
 - **Click any changed file** in the Working Tree Status panel to reveal that
   file in Finder, selected in its folder — handy for double-clicking it open in
   your editor, or in Preview for an image.
 
 For safety, only the repository folder and files in the current change set can
 be opened this way; nothing else is reachable.
+
+The terminal launcher uses **Terminal.app** by default. To use a different
+terminal, set the `GIT_DASHBOARD_TERMINAL` environment variable to its
+application name — for example, `export GIT_DASHBOARD_TERMINAL=iTerm`.
 
 Finder shows the folder in whatever view it's configured to use, and macOS
 often defaults to Gallery or Icon view. If you'd rather land in **List view**,

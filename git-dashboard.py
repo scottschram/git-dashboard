@@ -49,6 +49,10 @@ from urllib.parse import urlparse, parse_qs
 # fewer git invocations; 5s is the sweet spot for a "glance while you code" tool.
 POLL_INTERVAL_SECONDS = 5
 
+# macOS app the Terminal launcher opens. Override with the environment:
+#   export GIT_DASHBOARD_TERMINAL=iTerm
+TERMINAL_APP = os.environ.get("GIT_DASHBOARD_TERMINAL", "Terminal")
+
 
 # ─── Git Data Collection ────────────────────────────────────────────
 
@@ -598,12 +602,18 @@ def generate_html(info, repo_path, range_spec=None, live=False):
     else:
         branch_label = branch
 
-    # Path — click-to-reveal link in live (watch) mode, plain text otherwise.
+    # Path — click-to-reveal link in live (watch) mode, plain text otherwise;
+    # followed by a terminal launcher icon.
     path_str = escape(str(repo_path))
     if live:
         path_html = f'<span class="open-link" data-open=".">{path_str}</span>'
+        terminal_html = (
+            f'<span class="term-link" data-open="." data-app="terminal"'
+            f' title="Open in {escape(TERMINAL_APP)}">🖥️</span>'
+        )
     else:
         path_html = path_str
+        terminal_html = ""
 
     html = f'''<!DOCTYPE html>
 <html lang="en">
@@ -855,6 +865,15 @@ def generate_html(info, repo_path, range_spec=None, live=False):
     transition: text-decoration-color 0.15s;
   }}
   .open-link:hover {{ text-decoration-color: var(--accent); }}
+  .term-link {{
+    cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-dim);
+    padding: 1px 5px;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+  }}
+  .term-link:hover {{ color: var(--accent); background: var(--surface2); }}
   .commit-msg {{
     color: var(--text);
     flex: 1;
@@ -1050,7 +1069,7 @@ def generate_html(info, repo_path, range_spec=None, live=False):
     <div class="header-info">
       <strong>Remote:</strong> {escape(info["remote_url"])}
       &nbsp;&nbsp;·&nbsp;&nbsp;
-      <strong>Path:</strong> {path_html}
+      <strong>Path:</strong> {path_html} {terminal_html}
     </div>
   </div>
 
@@ -1125,10 +1144,15 @@ def inject_watch_script(html):
       location.reload();
     }
   };
-  // Click anything tagged data-open to reveal it in Finder via /open.
+  // Click anything tagged data-open to act on it via /open — reveal in
+  // Finder, or open a terminal there when data-app is set.
   document.addEventListener('click', function(e) {
     var el = e.target.closest('[data-open]');
-    if (el) fetch('/open?path=' + encodeURIComponent(el.getAttribute('data-open')));
+    if (!el) return;
+    var url = '/open?path=' + encodeURIComponent(el.getAttribute('data-open'));
+    var app = el.getAttribute('data-app');
+    if (app) url += '&app=' + encodeURIComponent(app);
+    fetch(url);
   });
 })();
 </script>
@@ -1294,10 +1318,12 @@ def make_request_handler(state):
                 state.remove_client(q)
 
         def _serve_open(self):
-            """Reveal an allowlisted path in Finder: open -R for a file,
-            plain open for the repo folder. Guarded by state.is_allowed."""
+            """Act on an allowlisted path: reveal in Finder (open -R for a
+            file, open for the repo folder), or open a terminal there
+            (app=terminal). Guarded by state.is_allowed."""
             params = parse_qs(urlparse(self.path).query)
             rel = (params.get("path") or [""])[0]
+            app = (params.get("app") or [""])[0]
             if not rel:
                 self.send_error(400)
                 return
@@ -1305,7 +1331,12 @@ def make_request_handler(state):
             if not state.is_allowed(abspath):
                 self.send_error(403)
                 return
-            cmd = ["open", abspath] if os.path.isdir(abspath) else ["open", "-R", abspath]
+            if app == "terminal":
+                cmd = ["open", "-a", TERMINAL_APP, abspath]
+            elif os.path.isdir(abspath):
+                cmd = ["open", abspath]
+            else:
+                cmd = ["open", "-R", abspath]
             try:
                 subprocess.run(cmd, timeout=5)
             except Exception:
