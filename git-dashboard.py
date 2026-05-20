@@ -445,15 +445,25 @@ def generate_html(info, repo_path, range_spec=None, live=False):
             return "deleted", "badge-deleted"
         return default_label, default_class
 
+    def open_attr(rel_path):
+        # data-open makes a file row click-to-reveal — only in live mode and
+        # only when the file is actually on disk (so deletions get no link).
+        if live and os.path.exists(os.path.join(repo_path, rel_path)):
+            return f' data-open="{escape(rel_path)}"'
+        return ""
+
     file_status_html = ""
     for line in (info["staged_status"].splitlines() if info["staged_status"] else []):
         label, cls = status_badge(line, "staged", "badge-staged")
-        file_status_html += f'<div class="file-entry"><span class="file-badge {cls}">{label}</span> {escape(line)}</div>\n'
+        attr = open_attr(line.split("\t")[-1])
+        file_status_html += f'<div class="file-entry"{attr}><span class="file-badge {cls}">{label}</span> {escape(line)}</div>\n'
     for line in (info["modified_status"].splitlines() if info["modified_status"] else []):
         label, cls = status_badge(line, "modified", "badge-modified")
-        file_status_html += f'<div class="file-entry"><span class="file-badge {cls}">{label}</span> {escape(line)}</div>\n'
+        attr = open_attr(line.split("\t")[-1])
+        file_status_html += f'<div class="file-entry"{attr}><span class="file-badge {cls}">{label}</span> {escape(line)}</div>\n'
     for f in info["untracked_files"]:
-        file_status_html += f'<div class="file-entry"><span class="file-badge badge-untracked">untracked</span> {escape(f)}</div>\n'
+        attr = open_attr(f)
+        file_status_html += f'<div class="file-entry"{attr}><span class="file-badge badge-untracked">untracked</span> {escape(f)}</div>\n'
 
     if not file_status_html:
         file_status_html = '<div class="panel-empty">✓ Working tree clean</div>'
@@ -796,6 +806,7 @@ def generate_html(info, repo_path, range_spec=None, live=False):
     gap: 10px;
   }}
   .file-entry:hover {{ background: var(--surface2); }}
+  .file-entry[data-open] {{ cursor: pointer; }}
   .file-badge {{
     font-size: 10px;
     text-transform: uppercase;
@@ -1151,9 +1162,14 @@ class WatchState:
             self.html = html.encode("utf-8")
 
     def _rebuild_allowed_paths(self, info):
-        """Refresh the set of paths /open may reveal — the repo root only.
-        (Part 2 extends this with the current change set.)"""
+        """Refresh the set of paths /open may reveal: the repo root plus
+        every changed file that currently exists on disk."""
         allowed = {os.path.realpath(self.repo_path)}
+        for rel in (info["staged_files"] + info["modified_files"]
+                    + info["untracked_files"]):
+            p = os.path.join(self.repo_path, rel)
+            if os.path.exists(p):
+                allowed.add(os.path.realpath(p))
         with self.allowed_lock:
             self.allowed_paths = allowed
 
