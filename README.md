@@ -1,6 +1,6 @@
 # git-dashboard
 
-A **live-updating**, browser-based git status dashboard with **word-level diff highlighting**. Single Python file, no framework, no dependencies beyond Python 3 and `git`.
+A **live-updating** browser-based git status dashboard with **word-level diff highlighting** for macOS. Single Python file, no framework, no dependencies beyond Python 3 and `git`.
 
 ![Word-level diff highlighting in git-dashboard — additions, deletions, and moved phrases each colored distinctly](docs/word-level-diff-demo.jpg)
 
@@ -60,11 +60,10 @@ The one-shot modes (`--once`, `--range`) write the dashboard HTML to `/tmp/<repo
 
 ## Requirements
 
+- macOS
 - Python 3 (uses only the standard library — no `pip install`)
 - `git`
 - A browser (uses your system default)
-
-Tested on macOS. Should work anywhere Python 3 and `git` run.
 
 ## What the dashboard shows
 
