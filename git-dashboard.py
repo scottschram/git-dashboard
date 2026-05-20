@@ -42,6 +42,7 @@ from difflib import SequenceMatcher
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 
 # Polling interval for watch mode (the default). Trades responsiveness for
@@ -399,7 +400,7 @@ def parse_diff_stat(stat_output):
     return files, insertions, deletions
 
 
-def generate_html(info, repo_path, range_spec=None):
+def generate_html(info, repo_path, range_spec=None, live=False):
     """Generate the complete dashboard HTML."""
 
     # Get raw diffs — range mode vs working tree mode
@@ -586,6 +587,13 @@ def generate_html(info, repo_path, range_spec=None):
         branch_label = f"{branch} → {tracking}"
     else:
         branch_label = branch
+
+    # Path — click-to-reveal link in live (watch) mode, plain text otherwise.
+    path_str = escape(str(repo_path))
+    if live:
+        path_html = f'<span class="open-link" data-open=".">{path_str}</span>'
+    else:
+        path_html = path_str
 
     html = f'''<!DOCTYPE html>
 <html lang="en">
@@ -828,6 +836,14 @@ def generate_html(info, repo_path, range_spec=None):
   a.commit-hash.commit-link:hover {{
     text-decoration-color: var(--accent);
   }}
+  .open-link {{
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: rgba(88,166,255,0.4);
+    transition: text-decoration-color 0.15s;
+  }}
+  .open-link:hover {{ text-decoration-color: var(--accent); }}
   .commit-msg {{
     color: var(--text);
     flex: 1;
@@ -1023,7 +1039,7 @@ def generate_html(info, repo_path, range_spec=None):
     <div class="header-info">
       <strong>Remote:</strong> {escape(info["remote_url"])}
       &nbsp;&nbsp;·&nbsp;&nbsp;
-      <strong>Path:</strong> {escape(str(repo_path))}
+      <strong>Path:</strong> {path_html}
     </div>
   </div>
 
@@ -1098,6 +1114,11 @@ def inject_watch_script(html):
       location.reload();
     }
   };
+  // Click anything tagged data-open to reveal it in Finder via /open.
+  document.addEventListener('click', function(e) {
+    var el = e.target.closest('[data-open]');
+    if (el) fetch('/open?path=' + encodeURIComponent(el.getAttribute('data-open')));
+  });
 })();
 </script>
 </body>"""
@@ -1116,14 +1137,30 @@ class WatchState:
         self.clients_lock = threading.Lock()
         self.last_hash = None
         self.shutdown_event = threading.Event()
+        self.allowed_paths = set()  # realpath'd paths /open may act on
+        self.allowed_lock = threading.Lock()
 
     def regenerate(self):
         """Rebuild the dashboard HTML from current repo state."""
         info = collect_repo_info(self.repo_path)
-        html = generate_html(info, self.repo_path, range_spec=self.range_spec)
+        self._rebuild_allowed_paths(info)
+        html = generate_html(info, self.repo_path,
+                             range_spec=self.range_spec, live=True)
         html = inject_watch_script(html)
         with self.html_lock:
             self.html = html.encode("utf-8")
+
+    def _rebuild_allowed_paths(self, info):
+        """Refresh the set of paths /open may reveal — the repo root only.
+        (Part 2 extends this with the current change set.)"""
+        allowed = {os.path.realpath(self.repo_path)}
+        with self.allowed_lock:
+            self.allowed_paths = allowed
+
+    def is_allowed(self, abspath):
+        """True if abspath is something /open is permitted to reveal."""
+        with self.allowed_lock:
+            return abspath in self.allowed_paths
 
     def get_html(self):
         with self.html_lock:
@@ -1198,6 +1235,8 @@ def make_request_handler(state):
                 self._serve_dashboard()
             elif self.path == "/events":
                 self._serve_events()
+            elif self.path.startswith("/open?"):
+                self._serve_open()
             else:
                 self.send_error(404)
 
@@ -1237,6 +1276,27 @@ def make_request_handler(state):
                 pass  # Browser tab closed; nothing to clean up beyond removal.
             finally:
                 state.remove_client(q)
+
+        def _serve_open(self):
+            """Reveal an allowlisted path in Finder: open -R for a file,
+            plain open for the repo folder. Guarded by state.is_allowed."""
+            params = parse_qs(urlparse(self.path).query)
+            rel = (params.get("path") or [""])[0]
+            if not rel:
+                self.send_error(400)
+                return
+            abspath = os.path.realpath(os.path.join(state.repo_path, rel))
+            if not state.is_allowed(abspath):
+                self.send_error(403)
+                return
+            cmd = ["open", abspath] if os.path.isdir(abspath) else ["open", "-R", abspath]
+            try:
+                subprocess.run(cmd, timeout=5)
+            except Exception:
+                self.send_error(500)
+                return
+            self.send_response(204)
+            self.end_headers()
 
     return Handler
 
