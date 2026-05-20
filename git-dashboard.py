@@ -629,14 +629,20 @@ def generate_html(info, repo_path, range_spec=None):
 
   /* ── Header ── */
   .header {{
+    margin-bottom: 24px;
+  }}
+  .header-top {{
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 20px 0 24px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 24px;
   }}
   .header-left {{ display: flex; align-items: center; gap: 16px; }}
+  .header-info {{
+    margin-top: 14px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }}
+  .header-info strong {{ color: var(--text); }}
   .header-icon {{
     width: 44px; height: 44px;
     background: linear-gradient(135deg, var(--accent), var(--purple));
@@ -649,7 +655,6 @@ def generate_html(info, repo_path, range_spec=None):
     font-weight: 700;
     color: var(--text-bright);
     font-family: 'JetBrains Mono', monospace;
-    display: block;
   }}
   .branch-pill {{
     display: inline-flex; align-items: center; gap: 6px;
@@ -989,32 +994,28 @@ def generate_html(info, repo_path, range_spec=None):
     text-decoration: none;
   }}
 
-  /* ── Footer ── */
-  .footer-info {{
-    margin-top: 20px;
-    padding: 14px 20px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    font-size: 13px;
-    color: var(--text-dim);
-  }}
-  .footer-info strong {{ color: var(--text); }}
 </style>
 </head>
 <body>
 <div class="dashboard">
 
   <div class="header">
-    <div class="header-left">
-      <div class="header-icon">⌥</div>
-      <div>
+    <div class="header-top">
+      <div class="header-left">
+        <div class="header-icon">⌥</div>
         {repo_name_html}
         <span class="branch-pill">{escape(info["branch"])}</span>
       </div>
+      <div class="header-right">
+        Generated {now}
+      </div>
     </div>
-    <div class="header-right">
-      Generated {now}
+    <div class="header-info">
+      <strong>Remote:</strong> {escape(info["remote_url"])}
+      &nbsp;&nbsp;·&nbsp;&nbsp;
+      <strong>Tracking:</strong> {escape(info["tracking"] or "none")}
+      &nbsp;&nbsp;·&nbsp;&nbsp;
+      <strong>Path:</strong> {escape(str(repo_path))}
     </div>
   </div>
 
@@ -1038,14 +1039,6 @@ def generate_html(info, repo_path, range_spec=None):
   </div>
 
   {diff_section}
-
-  <div class="footer-info">
-    <strong>Remote:</strong> {escape(info["remote_url"])}
-    &nbsp;&nbsp;·&nbsp;&nbsp;
-    <strong>Tracking:</strong> {escape(info["tracking"] or "none")}
-    &nbsp;&nbsp;·&nbsp;&nbsp;
-    <strong>Path:</strong> {escape(str(repo_path))}
-  </div>
 
 </div>
 </body>
