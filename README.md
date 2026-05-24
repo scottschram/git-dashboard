@@ -73,6 +73,35 @@ The one-shot modes (`--once`, `--range`) write the dashboard HTML to `/tmp/<repo
 - Full diff of all changes, with **word-level highlighting** of additions, deletions, and substitutions within modified lines
 - In `--range` mode: the same diff view, but for committed history rather than the working tree
 
+## Following main while on a feature branch
+
+When you're on any branch other than the default (`main`, `master`, etc.),
+the right column splits into two stacked cards so you can spot when main has
+moved underneath you:
+
+- **⎇ Branch** — only the commits unique to your branch
+  (`origin/main..HEAD`), capped at 12. The existing yellow highlight still
+  marks unpushed commits.
+- **📜 main** — recent commits on `origin/main` with a sync badge:
+  - green `In sync with main` when your branch already contains everything on main
+  - red `↓ N behind main` when collaborators have pushed commits you don't have
+    yet. Those commits appear at the top of the list with a salmon highlight.
+    The count is accurate even if more than 12 commits are behind (the list is
+    capped; the badge is not).
+
+The bottom card lists up to 12 entries, with at most 6 "already in your branch"
+commits shown for orientation — the rest of the slots go to behind-by
+commits. If you're more than 12 commits behind main, it's probably time to
+rebase anyway.
+
+The default branch is detected via `git symbolic-ref refs/remotes/origin/HEAD`,
+so it works for repos using `master` or `trunk` too. In a no-remote / scratch
+repo the dashboard falls back to a local `main` or `master` ref — useful when
+two terminal sessions share a repo and one of them commits on main while you
+work on a branch in the other. On the default branch itself, or in a repo
+with no detectable default, the right column stays as a single
+"📜 Recent Commits" card.
+
 ## Opening Finder and Terminal
 
 In watch mode the header and the changed-file list are interactive:

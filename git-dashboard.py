@@ -71,6 +71,35 @@ def run_git(args, cwd):
         return ""
 
 
+def find_default_ref(repo_path):
+    """
+    Resolve the project's default branch.
+
+    Returns (name, ref) — name is e.g. "main"/"master"/"trunk", ref is the
+    actual git ref to compare against (preferring origin/{name} so we see
+    collaborator pushes, falling back to local {name} so no-remote / scratch
+    repos still get a working bottom card). Either may be "" if the repo has
+    no detectable default branch.
+    """
+    name = ""
+    sym = run_git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo_path)
+    if sym.startswith("origin/"):
+        name = sym[len("origin/"):]
+    else:
+        for candidate in ("main", "master"):
+            if run_git(["rev-parse", "--verify", "--quiet", candidate], repo_path):
+                name = candidate
+                break
+
+    ref = ""
+    if name:
+        if run_git(["rev-parse", "--verify", "--quiet", f"origin/{name}"], repo_path):
+            ref = f"origin/{name}"
+        elif run_git(["rev-parse", "--verify", "--quiet", name], repo_path):
+            ref = name
+    return name, ref
+
+
 def collect_repo_info(repo_path):
     """Collect all repository metadata."""
     info = {}
@@ -112,6 +141,43 @@ def collect_repo_info(repo_path):
         else:
             info["sync_status"] = "Behind"
 
+    # Default branch info — used by the bottom "main" card on feature
+    # branches. ref may be origin/main or local main; see find_default_ref.
+    default_name, default_ref = find_default_ref(repo_path)
+    info["default_branch"] = default_name
+    info["default_ref"] = default_ref
+    info["show_main_card"] = bool(default_ref and default_name != info["branch"])
+
+    info["main_recent_commits"] = []
+    info["behind_main_hashes"] = set()
+    if info["show_main_card"]:
+        behind = run_git(["rev-list", f"HEAD..{default_ref}"], repo_path)
+        if behind:
+            info["behind_main_hashes"] = set(behind.splitlines())
+        main_log = run_git(
+            ["log", "-12", "--format=%h\t%H\t%s\t%ar", default_ref], repo_path
+        )
+        # Main isn't the focus on a feature branch — show all the "new on main"
+        # commits we can fit (up to 12), but cap "already in my branch" context
+        # at 6 entries. If there are >12 behind commits, the badge still shows
+        # the true count even though the list is capped.
+        IN_SYNC_CAP = 6
+        in_sync_seen = 0
+        for line in (main_log.splitlines() if main_log else []):
+            parts = line.split("\t", 3)
+            if len(parts) != 4:
+                continue
+            is_behind = parts[1] in info["behind_main_hashes"]
+            if not is_behind:
+                in_sync_seen += 1
+                if in_sync_seen > IN_SYNC_CAP:
+                    break
+            info["main_recent_commits"].append({
+                "hash": parts[0], "full_hash": parts[1],
+                "msg": parts[2], "date": parts[3],
+            })
+    info["behind_main"] = len(info["behind_main_hashes"])
+
     # Stash count
     stash = run_git(["stash", "list"], repo_path)
     info["stash_count"] = len(stash.splitlines()) if stash else 0
@@ -135,8 +201,16 @@ def collect_repo_info(repo_path):
         if unpushed:
             info["unpushed_hashes"] = set(unpushed.splitlines())
 
-    # Recent commits (include full hash for GitHub links)
-    log = run_git(["log", "--oneline", "-12", "--format=%h\t%H\t%s\t%ar"], repo_path)
+    # Recent commits (include full hash for GitHub links). On a feature branch
+    # we only show commits unique to the branch — anything already on main
+    # belongs in the bottom "main" card, not duplicated here.
+    if info["show_main_card"]:
+        log = run_git(
+            ["log", "-12", "--format=%h\t%H\t%s\t%ar", f"{default_ref}..HEAD"],
+            repo_path,
+        )
+    else:
+        log = run_git(["log", "--oneline", "-12", "--format=%h\t%H\t%s\t%ar"], repo_path)
     info["recent_commits"] = []
     for line in (log.splitlines() if log else []):
         parts = line.split("\t", 3)
@@ -506,6 +580,75 @@ def generate_html(info, repo_path, range_spec=None, live=False):
             f'</div>\n'
         )
 
+    # Right column — either a single "Recent Commits" panel (on the default
+    # branch, or no default branch detected) or two stacked panels: top
+    # "⎇ Branch" for the current branch, bottom "📜 <main>" comparing HEAD
+    # against the default ref.
+    show_main = info["show_main_card"]
+    branch_title = "⎇ Branch" if show_main else "📜 Recent Commits"
+    if show_main and not commits_html:
+        branch_body = '<div class="panel-empty">No commits on this branch yet</div>'
+    else:
+        branch_body = commits_html
+    branch_panel_html = (
+        f'<div class="panel">'
+        f'<div class="panel-header">{branch_title} {commits_header_extra}</div>'
+        f'<div class="panel-body">{branch_body}</div>'
+        f'</div>'
+    )
+
+    main_panel_html = ""
+    if show_main:
+        default_name = info["default_branch"]
+        behind = info["behind_main"]
+        if behind > 0:
+            main_badge = (
+                f'<span class="sync-badge sync-behind">'
+                f'↓ {behind} behind {escape(default_name)}</span>'
+            )
+        else:
+            main_badge = (
+                f'<span class="sync-badge sync-ok">'
+                f'In sync with {escape(default_name)}</span>'
+            )
+
+        main_commits_html = ""
+        behind_hashes = info["behind_main_hashes"]
+        for c in info["main_recent_commits"]:
+            is_behind = c["full_hash"] in behind_hashes
+            entry_class = (
+                "commit-entry commit-behind-main" if is_behind else "commit-entry"
+            )
+            if github_url:
+                commit_url = f'{github_url}/commit/{c["full_hash"]}'
+                hash_html = (
+                    f'<a class="commit-hash commit-link" '
+                    f'href="{escape(commit_url)}" target="_blank">'
+                    f'{escape(c["hash"])}</a>'
+                )
+            else:
+                hash_html = f'<span class="commit-hash">{escape(c["hash"])}</span>'
+            main_commits_html += (
+                f'<div class="{entry_class}">'
+                f'{hash_html}'
+                f'<span class="commit-msg">{escape(c["msg"])}</span>'
+                f'<span class="commit-date">{escape(c["date"])}</span>'
+                f'</div>\n'
+            )
+        if not main_commits_html:
+            main_commits_html = '<div class="panel-empty">No commits</div>'
+
+        main_panel_html = (
+            f'<div class="panel">'
+            f'<div class="panel-header">📜 {escape(default_name)} {main_badge}</div>'
+            f'<div class="panel-body">{main_commits_html}</div>'
+            f'</div>'
+        )
+
+    right_column_html = (
+        f'<div class="right-stack">{branch_panel_html}{main_panel_html}</div>'
+    )
+
     # Diff section — range mode or working tree mode
     diff_section = ""
     if is_range:
@@ -768,6 +911,12 @@ def generate_html(info, repo_path, range_spec=None, live=False):
     margin-bottom: 24px;
   }}
   @media (max-width: 900px) {{ .panels {{ grid-template-columns: 1fr; }} }}
+  .right-stack {{
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    min-width: 0;
+  }}
   .panel {{
     background: var(--surface);
     border: 1px solid var(--border);
@@ -905,6 +1054,15 @@ def generate_html(info, repo_path, range_spec=None, live=False):
     flex-shrink: 0;
     background: var(--yellow-bg);
     color: var(--yellow);
+  }}
+
+  /* ── Behind-main commit highlighting (bottom card) ── */
+  .commit-behind-main {{
+    background: var(--red-bg);
+    box-shadow: inset 3px 0 0 var(--red);
+  }}
+  .commit-behind-main .commit-hash {{
+    color: var(--red);
   }}
 
   /* ── Sync badges in commits panel header ── */
@@ -1087,12 +1245,7 @@ def generate_html(info, repo_path, range_spec=None, live=False):
         {file_status_html}
       </div>
     </div>
-    <div class="panel">
-      <div class="panel-header">📜 Recent Commits {commits_header_extra}</div>
-      <div class="panel-body">
-        {commits_html}
-      </div>
-    </div>
+    {right_column_html}
   </div>
 
   {diff_section}
@@ -1119,14 +1272,20 @@ def compute_state_hash(repo_path):
     The upstream ref is included so a push (which moves the remote-tracking
     branch but touches neither HEAD nor the working tree) triggers a refresh —
     otherwise the dashboard keeps showing the just-pushed commits as unpushed.
+
+    The default branch ref (origin/main or local main) is included so the
+    bottom "main" card refreshes when collaborators push to main, or when
+    main moves in a parallel terminal session in a no-remote repo.
     """
     status = run_git(["status", "--porcelain"], repo_path)
     head = run_git(["rev-parse", "HEAD"], repo_path)
     upstream = run_git(["rev-parse", "@{upstream}"], repo_path)
+    _, default_ref = find_default_ref(repo_path)
+    default_head = run_git(["rev-parse", default_ref], repo_path) if default_ref else ""
     unstaged = run_git(["diff"], repo_path)
     staged = run_git(["diff", "--cached"], repo_path)
     return hashlib.sha1(
-        f"{status}|{head}|{upstream}|{unstaged}|{staged}".encode()
+        f"{status}|{head}|{upstream}|{default_head}|{unstaged}|{staged}".encode()
     ).hexdigest()
 
 
