@@ -754,9 +754,14 @@ def generate_html(info, repo_path, range_spec=None, live=False):
             f'<span class="term-link" data-open="." data-app="terminal"'
             f' title="Open in {escape(TERMINAL_APP)}">🖥️</span>'
         )
+        refresh_html = (
+            '<span class="refresh-btn" data-refresh '
+            'title="Re-scan repository">↻</span>'
+        )
     else:
         path_html = path_str
         terminal_html = ""
+        refresh_html = ""
 
     html = f'''<!DOCTYPE html>
 <html lang="en">
@@ -1023,6 +1028,23 @@ def generate_html(info, repo_path, range_spec=None, live=False):
     transition: color 0.15s, background 0.15s;
   }}
   .term-link:hover {{ color: var(--accent); background: var(--surface2); }}
+  .refresh-btn {{
+    cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px;
+    line-height: 1;
+    color: var(--text-dim);
+    padding: 4px 8px;
+    border-radius: 6px;
+    user-select: none;
+    transition: color 0.15s, background 0.15s;
+  }}
+  .refresh-btn:hover {{ color: var(--accent); background: var(--surface2); }}
+  .refresh-btn.spinning {{ animation: refresh-spin 0.6s linear infinite; }}
+  @keyframes refresh-spin {{
+    from {{ transform: rotate(0deg); }}
+    to {{ transform: rotate(360deg); }}
+  }}
   .commit-msg {{
     color: var(--text);
     flex: 1;
@@ -1221,6 +1243,7 @@ def generate_html(info, repo_path, range_spec=None, live=False):
       <div class="header-left">
         <div class="header-icon">⌥</div>
         {repo_name_html}
+        {refresh_html}
         <span class="branch-pill">{escape(branch_label)}</span>
       </div>
       <div class="header-right">
@@ -1309,6 +1332,12 @@ def inject_watch_script(html):
   // Click anything tagged data-open to act on it via /open — reveal in
   // Finder, or open a terminal there when data-app is set.
   document.addEventListener('click', function(e) {
+    var refresh = e.target.closest('[data-refresh]');
+    if (refresh) {
+      refresh.classList.add('spinning');
+      fetch('/refresh');
+      return;
+    }
     var el = e.target.closest('[data-open]');
     if (!el) return;
     var url = '/open?path=' + encodeURIComponent(el.getAttribute('data-open'));
@@ -1346,6 +1375,22 @@ class WatchState:
         html = inject_watch_script(html)
         with self.html_lock:
             self.html = html.encode("utf-8")
+
+    def force_refresh(self):
+        """Re-scan and tell every client to reload, regardless of whether the
+        watched state actually changed. Triggered by the header ↻ button when
+        the user suspects the dashboard is stale — e.g. a local commit on a
+        non-tracked default branch that the poll hash doesn't notice.
+
+        last_hash is recomputed *after* regenerate(), because regenerate runs
+        `git fetch` — if that pulls new commits, the upstream ref moves and a
+        pre-fetch hash would mismatch on the very next poll tick, causing a
+        spurious second refresh."""
+        self.regenerate()
+        self.last_hash = compute_state_hash(self.repo_path)
+        self.broadcast("refresh")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{timestamp}] Refreshed (manual)", flush=True)
 
     def _rebuild_allowed_paths(self, info):
         """Refresh the set of paths /open may reveal: the repo root plus
@@ -1439,6 +1484,10 @@ def make_request_handler(state):
                 self._serve_events()
             elif self.path.startswith("/open?"):
                 self._serve_open()
+            elif self.path == "/refresh":
+                state.force_refresh()
+                self.send_response(204)
+                self.end_headers()
             else:
                 self.send_error(404)
 
