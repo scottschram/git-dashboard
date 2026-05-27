@@ -1299,8 +1299,16 @@ def compute_state_hash(repo_path):
     The default branch ref (origin/main or local main) is included so the
     bottom "main" card refreshes when collaborators push to main, or when
     main moves in a parallel terminal session in a no-remote repo.
+
+    --untracked-files=all is required: the default ("normal") collapses
+    untracked directories to a single entry, so adding a file inside an
+    already-untracked directory wouldn't change the hash and the poll
+    loop would never trigger a refresh. (Cheap in practice — .gitignore
+    is still honored, so node_modules etc. are not enumerated.)
     """
-    status = run_git(["status", "--porcelain"], repo_path)
+    status = run_git(
+        ["status", "--porcelain", "--untracked-files=all"], repo_path
+    )
     head = run_git(["rev-parse", "HEAD"], repo_path)
     upstream = run_git(["rev-parse", "@{upstream}"], repo_path)
     _, default_ref = find_default_ref(repo_path)
