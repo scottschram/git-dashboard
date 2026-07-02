@@ -22,11 +22,23 @@ This collapses verification from *"carefully re-read the whole paragraph to conf
 
 ## Install
 
-Clone the repo and symlink to `~/bin/gd` for casual typing:
+Clone the repo and run the deploy script, which symlinks `gd` into `~/bin` for casual typing:
 
 ```bash
 git clone https://github.com/scottschram/git-dashboard.git
 cd git-dashboard
+script/deploy
+```
+
+The script is idempotent — safe to re-run any time. It repoints a stale `gd` link at the current checkout, refuses to overwrite a `gd` that isn't a symlink, and warns if `~/bin` isn't on your `PATH`. To install somewhere else, set `BIN_DIR`:
+
+```bash
+BIN_DIR=~/.local/bin script/deploy
+```
+
+Prefer to do it by hand? The script is equivalent to:
+
+```bash
 chmod +x git-dashboard.py
 ln -s "$PWD/git-dashboard.py" ~/bin/gd
 ```
