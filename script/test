@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# script/test — run the suite in an ephemeral uvx environment.
+# No venv, no install step: uvx fetches pytest (cached after the first run).
+#   script/test              run everything
+#   script/test -v -k hash   args pass straight through to pytest
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec uvx pytest "$@"
