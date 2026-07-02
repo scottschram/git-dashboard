@@ -100,6 +100,21 @@ def find_default_ref(repo_path):
     return name, ref
 
 
+def derive_github_url(remote_url):
+    """
+    Derive the browsable GitHub web URL from a remote URL.
+
+    Handles SSH (git@github.com:user/repo.git) and HTTPS
+    (https://github.com/user/repo.git) forms, stripping a trailing .git.
+    Returns "" for anything that isn't a GitHub remote.
+    """
+    if "github.com" not in remote_url:
+        return ""
+    gh = re.sub(r'^git@github\.com:', 'https://github.com/', remote_url)
+    gh = re.sub(r'\.git$', '', gh)
+    return gh
+
+
 def collect_repo_info(repo_path):
     """Collect all repository metadata."""
     info = {}
@@ -221,15 +236,7 @@ def collect_repo_info(repo_path):
             })
 
     # Derive GitHub web URL from remote
-    info["github_url"] = ""
-    remote = info["remote_url"]
-    if "github.com" in remote:
-        # Handle SSH: git@github.com:user/repo.git
-        # Handle HTTPS: https://github.com/user/repo.git
-        gh = remote
-        gh = re.sub(r'^git@github\.com:', 'https://github.com/', gh)
-        gh = re.sub(r'\.git$', '', gh)
-        info["github_url"] = gh
+    info["github_url"] = derive_github_url(info["remote_url"])
 
     return info
 
