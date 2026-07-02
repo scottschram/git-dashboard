@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# script/deploy — symlink `gd` into ~/bin. Idempotent and safe to re-run.
+# Override the target dir:  BIN_DIR=/some/where script/deploy
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REPO="$(pwd)"
+TARGET="$REPO/git-dashboard.py"
+BIN_DIR="${BIN_DIR:-$HOME/bin}"
+LINK="$BIN_DIR/gd"
+
+# The thing we link to must exist and run on its own.
+[ -x "$TARGET" ] || { echo "deploy: $TARGET is missing or not executable." >&2; exit 1; }
+head -1 "$TARGET" | grep -q '^#!' || echo "deploy: warning — $TARGET has no shebang; 'gd' may not run standalone." >&2
+
+mkdir -p "$BIN_DIR"
+
+if [ -L "$LINK" ]; then
+  if [ "$(readlink "$LINK")" = "$TARGET" ]; then
+    echo "✓ gd already points here — nothing to do."
+  else
+    ln -sfn "$TARGET" "$LINK"
+    echo "✓ gd repointed → $TARGET"
+  fi
+elif [ -e "$LINK" ]; then
+  echo "deploy: $LINK exists and is NOT a symlink — refusing to overwrite. Move it aside and re-run." >&2
+  exit 1
+else
+  ln -s "$TARGET" "$LINK"
+  echo "✓ gd installed → $TARGET"
+fi
+
+case ":$PATH:" in
+  *":$BIN_DIR:"*) : ;;
+  *) echo "note: $BIN_DIR is not on your PATH — add it to use 'gd'." >&2 ;;
+esac
