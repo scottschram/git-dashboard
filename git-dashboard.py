@@ -1004,44 +1004,8 @@ PAGE_TEMPLATE = string.Template('''<!DOCTYPE html>
 </html>''')
 
 
-def generate_html(info, repo_path, range_spec=None, live=False):
-    """Generate the complete dashboard HTML."""
-
-    # Get raw diffs — range mode vs working tree mode
-    is_range = range_spec is not None
-    range_diff_html = ""
-    range_files = range_insertions = range_deletions = 0
-    staged_diff_html = ""
-    unstaged_diff_html = ""
-
-    if is_range:
-        # Determine if this is a two-dot committed range or open-ended (includes working tree)
-        if ".." in range_spec:
-            # Two-dot range: committed changes only
-            range_diff = run_git(["diff", range_spec], repo_path)
-            range_stat = run_git(["diff", "--stat", range_spec], repo_path)
-            range_label = range_spec
-        else:
-            # Single ref: diff from that ref to working tree
-            range_diff = run_git(["diff", range_spec], repo_path)
-            range_stat = run_git(["diff", "--stat", range_spec], repo_path)
-            range_label = f"{range_spec}..working tree"
-        range_diff_html = parse_and_render_diff(range_diff, "range")
-        range_files, range_insertions, range_deletions = parse_diff_stat(range_stat)
-    else:
-        staged_diff = run_git(["diff", "--cached"], repo_path)
-        unstaged_diff = run_git(["diff"], repo_path)
-        staged_diff_html = parse_and_render_diff(staged_diff, "staged")
-        unstaged_diff_html = parse_and_render_diff(unstaged_diff, "unstaged")
-
-    def zero_class(n):
-        return " zero" if n == 0 else ""
-
-    staged_count = len(info["staged_files"])
-    modified_count = len(info["modified_files"])
-    untracked_count = len(info["untracked_files"])
-
-    # Build file status HTML
+def _render_file_status(info, live, repo_path):
+    """Working Tree Status panel body — staged/modified/untracked rows."""
     def status_badge(line, default_label, default_class):
         # name-status lines start with a status code (M, A, D, R100, ...) + tab
         code = line[:1]
@@ -1071,22 +1035,11 @@ def generate_html(info, repo_path, range_spec=None, live=False):
 
     if not file_status_html:
         file_status_html = '<div class="panel-empty">✓ Working tree clean</div>'
+    return file_status_html
 
-    # Commits panel header with sync status
-    ahead, behind = info["ahead"], info["behind"]
-    sync_parts = []
-    if ahead > 0:
-        sync_parts.append(f'<span class="sync-badge sync-ahead">↑ {ahead} unpushed</span>')
-    if behind > 0:
-        sync_parts.append(f'<span class="sync-badge sync-behind">↓ {behind} behind</span>')
-    if not sync_parts and info["tracking"]:
-        sync_parts.append('<span class="sync-badge sync-ok">In sync</span>')
-    elif not info["tracking"]:
-        sync_parts.append('<span class="sync-badge sync-notrack">No remote</span>')
-    commits_header_extra = " ".join(sync_parts)
 
-    # Commits HTML — unpushed highlighted, pushed linked to GitHub
-    github_url = info["github_url"]
+def _render_commits(info, github_url):
+    """Branch commit rows — unpushed highlighted, pushed linked to GitHub."""
     commits_html = ""
     for c in info["recent_commits"]:
         is_unpushed = c["full_hash"] in info["unpushed_hashes"]
@@ -1105,11 +1058,23 @@ def generate_html(info, repo_path, range_spec=None, live=False):
             f'<span class="commit-date">{escape(c["date"])}</span>'
             f'</div>\n'
         )
+    return commits_html
 
-    # Right column — either a single "Recent Commits" panel (on the default
-    # branch, or no default branch detected) or two stacked panels: top
-    # "⎇ Branch" for the current branch, bottom "📜 <main>" comparing HEAD
-    # against the default ref.
+
+def _render_branch_panel(info, commits_html):
+    """Top-right panel: current-branch commits plus a sync-status badge."""
+    ahead, behind = info["ahead"], info["behind"]
+    sync_parts = []
+    if ahead > 0:
+        sync_parts.append(f'<span class="sync-badge sync-ahead">↑ {ahead} unpushed</span>')
+    if behind > 0:
+        sync_parts.append(f'<span class="sync-badge sync-behind">↓ {behind} behind</span>')
+    if not sync_parts and info["tracking"]:
+        sync_parts.append('<span class="sync-badge sync-ok">In sync</span>')
+    elif not info["tracking"]:
+        sync_parts.append('<span class="sync-badge sync-notrack">No remote</span>')
+    commits_header_extra = " ".join(sync_parts)
+
     show_main = info["show_main_card"]
     branch_title = "⎇ Branch" if show_main else "📜 Recent Commits"
     if show_main and not commits_html:
@@ -1122,7 +1087,12 @@ def generate_html(info, repo_path, range_spec=None, live=False):
         f'<div class="panel-body">{branch_body}</div>'
         f'</div>'
     )
+    return branch_panel_html
 
+
+def _render_main_panel(info, github_url):
+    """Bottom-right panel: HEAD versus the default branch."""
+    show_main = info["show_main_card"]
     main_panel_html = ""
     if show_main:
         default_name = info["default_branch"]
@@ -1170,12 +1140,59 @@ def generate_html(info, repo_path, range_spec=None, live=False):
             f'<div class="panel-body">{main_commits_html}</div>'
             f'</div>'
         )
+    return main_panel_html
 
-    right_column_html = (
-        f'<div class="right-stack">{branch_panel_html}{main_panel_html}</div>'
-    )
 
-    # Diff section — range mode or working tree mode
+def _render_stats_row(info, is_range, staged_count, modified_count,
+                      untracked_count, range_files, range_insertions,
+                      range_deletions):
+    """Compact stat cards — a different set for range vs working-tree mode."""
+    def zero_class(n):
+        return " zero" if n == 0 else ""
+
+    if is_range:
+        stats_row_html = f'''
+    <div class="stat-card modified">
+      <div class="stat-label">Files Changed</div>
+      <div class="stat-value{zero_class(range_files)}">{range_files}</div>
+    </div>
+    <div class="stat-card staged">
+      <div class="stat-label">Insertions</div>
+      <div class="stat-value{zero_class(range_insertions)}">+{range_insertions}</div>
+    </div>
+    <div class="stat-card untracked">
+      <div class="stat-label">Deletions</div>
+      <div class="stat-value{zero_class(range_deletions)}">−{range_deletions}</div>
+    </div>
+    <div class="stat-card stash">
+      <div class="stat-label">Stashes</div>
+      <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
+    </div>'''
+    else:
+        stats_row_html = f'''
+    <div class="stat-card staged">
+      <div class="stat-label">Staged</div>
+      <div class="stat-value{zero_class(staged_count)}">{staged_count}</div>
+    </div>
+    <div class="stat-card modified">
+      <div class="stat-label">Modified</div>
+      <div class="stat-value{zero_class(modified_count)}">{modified_count}</div>
+    </div>
+    <div class="stat-card untracked">
+      <div class="stat-label">Untracked</div>
+      <div class="stat-value{zero_class(untracked_count)}">{untracked_count}</div>
+    </div>
+    <div class="stat-card stash">
+      <div class="stat-label">Stashes</div>
+      <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
+    </div>'''
+    return stats_row_html
+
+
+def _render_diff_section(is_range, range_label, range_diff_html, range_files,
+                         range_insertions, range_deletions, staged_diff_html,
+                         unstaged_diff_html, staged_count, modified_count):
+    """Full-width Diff Viewer panel — range mode or working-tree mode."""
     diff_section = ""
     if is_range:
         if range_diff_html:
@@ -1214,44 +1231,62 @@ def generate_html(info, repo_path, range_spec=None, live=False):
             '<div class="panel-body"><div class="panel-empty">No uncommitted changes to diff</div></div>'
             '</div>'
         )
+    return diff_section
 
-    # Stats row — compact horizontal cards; different set for range vs working tree
+
+def generate_html(info, repo_path, range_spec=None, live=False):
+    """Generate the complete dashboard HTML."""
+
+    # Get raw diffs — range mode vs working tree mode
+    is_range = range_spec is not None
+    range_diff_html = ""
+    range_label = ""
+    range_files = range_insertions = range_deletions = 0
+    staged_diff_html = ""
+    unstaged_diff_html = ""
+
     if is_range:
-        stats_row_html = f'''
-    <div class="stat-card modified">
-      <div class="stat-label">Files Changed</div>
-      <div class="stat-value{zero_class(range_files)}">{range_files}</div>
-    </div>
-    <div class="stat-card staged">
-      <div class="stat-label">Insertions</div>
-      <div class="stat-value{zero_class(range_insertions)}">+{range_insertions}</div>
-    </div>
-    <div class="stat-card untracked">
-      <div class="stat-label">Deletions</div>
-      <div class="stat-value{zero_class(range_deletions)}">−{range_deletions}</div>
-    </div>
-    <div class="stat-card stash">
-      <div class="stat-label">Stashes</div>
-      <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
-    </div>'''
+        # Determine if this is a two-dot committed range or open-ended (includes working tree)
+        if ".." in range_spec:
+            # Two-dot range: committed changes only
+            range_diff = run_git(["diff", range_spec], repo_path)
+            range_stat = run_git(["diff", "--stat", range_spec], repo_path)
+            range_label = range_spec
+        else:
+            # Single ref: diff from that ref to working tree
+            range_diff = run_git(["diff", range_spec], repo_path)
+            range_stat = run_git(["diff", "--stat", range_spec], repo_path)
+            range_label = f"{range_spec}..working tree"
+        range_diff_html = parse_and_render_diff(range_diff, "range")
+        range_files, range_insertions, range_deletions = parse_diff_stat(range_stat)
     else:
-        stats_row_html = f'''
-    <div class="stat-card staged">
-      <div class="stat-label">Staged</div>
-      <div class="stat-value{zero_class(staged_count)}">{staged_count}</div>
-    </div>
-    <div class="stat-card modified">
-      <div class="stat-label">Modified</div>
-      <div class="stat-value{zero_class(modified_count)}">{modified_count}</div>
-    </div>
-    <div class="stat-card untracked">
-      <div class="stat-label">Untracked</div>
-      <div class="stat-value{zero_class(untracked_count)}">{untracked_count}</div>
-    </div>
-    <div class="stat-card stash">
-      <div class="stat-label">Stashes</div>
-      <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
-    </div>'''
+        staged_diff = run_git(["diff", "--cached"], repo_path)
+        unstaged_diff = run_git(["diff"], repo_path)
+        staged_diff_html = parse_and_render_diff(staged_diff, "staged")
+        unstaged_diff_html = parse_and_render_diff(unstaged_diff, "unstaged")
+
+    staged_count = len(info["staged_files"])
+    modified_count = len(info["modified_files"])
+    untracked_count = len(info["untracked_files"])
+    github_url = info["github_url"]
+
+    # Assemble the page fragments, then fill the page template.
+    file_status_html = _render_file_status(info, live, repo_path)
+    commits_html = _render_commits(info, github_url)
+    branch_panel_html = _render_branch_panel(info, commits_html)
+    main_panel_html = _render_main_panel(info, github_url)
+    right_column_html = (
+        f'<div class="right-stack">{branch_panel_html}{main_panel_html}</div>'
+    )
+    diff_section = _render_diff_section(
+        is_range, range_label, range_diff_html, range_files, range_insertions,
+        range_deletions, staged_diff_html, unstaged_diff_html, staged_count,
+        modified_count,
+    )
+    stats_row_html = _render_stats_row(
+        info, is_range, staged_count, modified_count, untracked_count,
+        range_files, range_insertions, range_deletions,
+    )
 
     now = datetime.now().strftime("%B %d, %Y at %I:%M:%S %p")
 
