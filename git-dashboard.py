@@ -37,6 +37,7 @@ import webbrowser
 import hashlib
 import queue
 import threading
+import string
 from datetime import datetime
 from difflib import SequenceMatcher
 from html import escape
@@ -952,6 +953,57 @@ DASHBOARD_CSS = """
 """
 
 
+PAGE_TEMPLATE = string.Template('''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Git Dashboard — $title</title>
+<style>$css</style>
+</head>
+<body>
+<div class="dashboard">
+
+  <div class="header">
+    <div class="header-top">
+      <div class="header-left">
+        <div class="header-icon">⌥</div>
+        $repo_name
+        $refresh
+        <span class="branch-pill">$branch_label</span>
+      </div>
+      <div class="header-right">
+        Generated $now
+      </div>
+    </div>
+    <div class="header-info">
+      <strong>Remote:</strong> $remote
+      &nbsp;&nbsp;·&nbsp;&nbsp;
+      <strong>Path:</strong> $path $terminal
+    </div>
+  </div>
+
+  <div class="stats-row">
+    $stats_row
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <div class="panel-header">📋 Working Tree Status</div>
+      <div class="panel-body">
+        $file_status
+      </div>
+    </div>
+    $right_column
+  </div>
+
+  $diff_section
+
+</div>
+</body>
+</html>''')
+
+
 def generate_html(info, repo_path, range_spec=None, live=False):
     """Generate the complete dashboard HTML."""
 
@@ -1237,55 +1289,21 @@ def generate_html(info, repo_path, range_spec=None, live=False):
         terminal_html = ""
         refresh_html = ""
 
-    html = f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Git Dashboard — {escape(info["repo_name"])}</title>
-<style>{DASHBOARD_CSS}</style>
-</head>
-<body>
-<div class="dashboard">
-
-  <div class="header">
-    <div class="header-top">
-      <div class="header-left">
-        <div class="header-icon">⌥</div>
-        {repo_name_html}
-        {refresh_html}
-        <span class="branch-pill">{escape(branch_label)}</span>
-      </div>
-      <div class="header-right">
-        Generated {now}
-      </div>
-    </div>
-    <div class="header-info">
-      <strong>Remote:</strong> {escape(info["remote_url"])}
-      &nbsp;&nbsp;·&nbsp;&nbsp;
-      <strong>Path:</strong> {path_html} {terminal_html}
-    </div>
-  </div>
-
-  <div class="stats-row">
-    {stats_row_html}
-  </div>
-
-  <div class="panels">
-    <div class="panel">
-      <div class="panel-header">📋 Working Tree Status</div>
-      <div class="panel-body">
-        {file_status_html}
-      </div>
-    </div>
-    {right_column_html}
-  </div>
-
-  {diff_section}
-
-</div>
-</body>
-</html>'''
+    html = PAGE_TEMPLATE.substitute(
+        css=DASHBOARD_CSS,
+        title=escape(info["repo_name"]),
+        repo_name=repo_name_html,
+        branch_label=escape(branch_label),
+        refresh=refresh_html,
+        now=now,
+        remote=escape(info["remote_url"]),
+        path=path_html,
+        terminal=terminal_html,
+        stats_row=stats_row_html,
+        file_status=file_status_html,
+        right_column=right_column_html,
+        diff_section=diff_section,
+    )
 
     return html
 
