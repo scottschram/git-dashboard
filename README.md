@@ -77,6 +77,20 @@ The one-shot modes (`--once`, `--range`) write the dashboard HTML to `/tmp/<repo
 - `git`
 - A browser (uses your system default)
 
+## Tests
+
+There's a pytest suite under `tests/` — run it with:
+
+```bash
+script/test
+```
+
+`script/test` runs pytest through `uvx` (from [uv](https://docs.astral.sh/uv/)) in an ephemeral, cached environment — no virtualenv to create, no `pip install`. Install `uv` first if you don't have it (`brew install uv`).
+
+**These are development-only dependencies.** `uv` and `pytest` are needed *only* to run the tests — never to run the dashboard. The tool keeps the zero-dependency, standard-library-only runtime described under [Requirements](#requirements) above; the test tooling doesn't touch it.
+
+The suite covers the pure diff and parsing functions and the git-integration logic (via hermetic, offline temporary repositories), plus golden-master snapshots of the generated HTML. If an intentional change to the HTML updates those snapshots, re-bless them with `UPDATE_GOLDENS=1 script/test -k golden` and review the diff.
+
 ## What the dashboard shows
 
 - Branch + tracking status (ahead / behind remote, in sync, no remote)
