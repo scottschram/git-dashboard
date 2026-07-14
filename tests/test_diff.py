@@ -321,3 +321,102 @@ diff --git a/two.txt b/two.txt
     assert out.count('<details class="diff-file"') == 2
     assert out.count("</div></details>") == 2
     assert "one.txt" in out and "two.txt" in out
+
+
+# ─── parse_and_render_diff: pathological-diff guards ────────────────
+# Motivating incident: a PDF with no NUL in its first 8000 bytes slipped
+# git's binary sniff and was text-diffed — 11,566 lines of raw stream data
+# that first crashed run_git's strict decode, then shipped the browser a
+# 7.8 MB page. These guards live in the display layer only;
+# compute_state_hash still sees the full raw diff.
+
+def _deletion_diff(filename, lines):
+    """A single-file whole-file-deletion diff, as git renders one."""
+    return (
+        f"diff --git a/{filename} b/{filename}\n"
+        f"deleted file mode 100644\n"
+        f"index 1111111..0000000\n"
+        f"--- a/{filename}\n"
+        f"+++ /dev/null\n"
+        f"@@ -1,{len(lines)} +0,0 @@\n"
+        + "\n".join(f"-{line}" for line in lines) + "\n"
+    )
+
+
+def test_render_collapses_diff_containing_nul(gd):
+    # Any NUL means binary — git's own heuristic, minus the 8000-byte
+    # window that let the PDF through. NULs survive errors="replace"
+    # decoding (0x00 is valid UTF-8), so they reach the renderer.
+    diff = _deletion_diff("doc.pdf", ["%PDF-1.4", "stream\x00data", "endstream"])
+    out = gd.parse_and_render_diff(diff, "staged")
+
+    assert "Apparent binary file" in out
+    assert "diff-del" not in out
+    # The file is still listed: header, name, and pill survive.
+    assert out.count('<details class="diff-file"') == 1
+    assert "doc.pdf" in out
+    assert 'pill-staged' in out
+
+
+def test_render_collapses_replacement_char_dense_diff(gd):
+    # NUL-free binary: run_git's errors="replace" turns invalid bytes into
+    # U+FFFD. Above 10% weird-char density the content was never text.
+    lines = ["���� soup ���"] * 6
+    out = gd.parse_and_render_diff(_deletion_diff("blob.bin", lines), "unstaged")
+
+    assert "Apparent binary file" in out
+    assert "diff-del" not in out
+
+
+def test_render_keeps_text_with_sparse_replacement_chars(gd):
+    # A Latin-1 text file decodes with a U+FFFD hole per accented char —
+    # a few percent density. Still a readable, useful diff: must NOT collapse.
+    lines = ["Agnus De�, qui tollis peccata mundi"] * 10
+    out = gd.parse_and_render_diff(_deletion_diff("lyrics.txt", lines), "unstaged")
+
+    assert "Apparent binary file" not in out
+    assert out.count("diff-del") == 10
+
+
+def test_render_truncates_oversize_diff(gd):
+    # 300 deleted lines + 1 hunk header = 301 displayed lines, over the 250
+    # cap: show the first 200 (hunk header + 199 content), then a stub that
+    # points back at the command line for the rest.
+    lines = [f"line {i} content" for i in range(300)]
+    out = gd.parse_and_render_diff(_deletion_diff("big.txt", lines), "staged")
+
+    assert "-line 198 content</div>" in out
+    assert "-line 199 content</div>" not in out
+    assert "101 more lines" in out
+    assert "git diff --cached" in out  # staged label → staged command
+
+
+def test_render_at_truncation_threshold_shows_everything(gd):
+    # 249 content lines + hunk header = 250 displayed lines: exactly at the
+    # cap, nothing is hidden — no cliff where a small diff loses its tail.
+    lines = [f"line {i} content" for i in range(249)]
+    out = gd.parse_and_render_diff(_deletion_diff("mid.txt", lines), "unstaged")
+
+    assert "-line 248 content</div>" in out
+    assert "more lines" not in out
+
+
+def test_render_splits_on_newline_only(gd):
+    # str.splitlines() also splits on \x0b, \x0c, \x85, etc. — control
+    # characters that binary content embeds *inside* a git line. That
+    # multiplied 13,300 git lines into 73,235 rendered lines, with the
+    # fragments masquerading as context lines. Git defines lines by \n
+    # alone; the renderer must match git.
+    diff = (
+        "diff --git a/a.txt b/a.txt\n"
+        "--- a/a.txt\n"
+        "+++ b/a.txt\n"
+        "@@ -1 +1 @@\n"
+        "-alpha\x0bbeta gamma delta epsilon zeta\x85eta theta iota kappa\n"
+        "+replacement line of ordinary text\n"
+    )
+    out = gd.parse_and_render_diff(diff, "unstaged")
+
+    assert out.count("diff-del") == 1     # one git line → one rendered line
+    assert "diff-ctx" not in out          # no fragments posing as context
+    assert "kappa" in out                 # ...and nothing lost

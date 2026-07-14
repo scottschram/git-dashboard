@@ -60,14 +60,19 @@ TERMINAL_APP = os.environ.get("GIT_DASHBOARD_TERMINAL", "Terminal")
 def run_git(args, cwd):
     """Run a git command and return stdout."""
     try:
+        # Capture bytes and decode by hand. git output is not guaranteed
+        # UTF-8: a NUL-free binary file (some PDFs) slips past git's binary
+        # sniff and gets text-diffed raw — strict decoding would crash
+        # inside subprocess.run, past our except. And subprocess text mode
+        # would also apply universal-newline translation, turning embedded
+        # \r into \n and inflating such a diff's line count.
         result = subprocess.run(
             ["git"] + args,
             cwd=cwd,
             capture_output=True,
-            text=True,
             timeout=30
         )
-        return result.stdout.strip()
+        return result.stdout.decode("utf-8", errors="replace").strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ""
 
@@ -373,18 +378,44 @@ def pair_changed_lines(removed_lines, added_lines):
 
 # ─── Diff Parser ────────────────────────────────────────────────────
 
+# Display guards for pathological diffs. Git's binary sniff only checks the
+# first 8000 bytes for a NUL, so a NUL-free binary file (some PDFs) gets
+# text-diffed raw — thousands of lines of stream garbage. And this dashboard
+# is for reviewing small diffs and staying aware of changes, not reading
+# bulk moves; anything longer belongs back at the command line. The guards
+# apply to display only — compute_state_hash hashes the full raw diff.
+DIFF_FILE_MAX_LINES = 250    # beyond this, a file's diff is truncated...
+DIFF_FILE_SHOWN_LINES = 200  # ...to this many lines (never hides < 50)
+BINARY_WEIRD_CHAR_RATIO = 0.10
+
+# U+FFFD (run_git's errors="replace" output) and C0 controls other than
+# tab/newline. Latin-1 text decoded as UTF-8 stays under a few percent —
+# one U+FFFD per accented char; binary content lands far above 10%.
+_WEIRD_DIFF_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f�]")
+
+
+def _looks_binary(text):
+    """True if a file's diff body reads as binary rather than text."""
+    if "\x00" in text:
+        return True
+    return len(_WEIRD_DIFF_CHARS.findall(text)) > len(text) * BINARY_WEIRD_CHAR_RATIO
+
+
 def parse_and_render_diff(diff_text, diff_label):
     """
     Parse git diff output and render as HTML with word-level highlighting.
+
+    Splits on \\n only — git's own line definition. splitlines() would also
+    split on control characters embedded inside a git line (\\x0b, \\x0c,
+    \\x1e, ...), multiplying binary content into thousands of extra lines
+    that masquerade as context.
     """
     if not diff_text:
         return ""
 
     html_parts = []
-    current_file = None
     hunk_removed = []  # Buffer for consecutive removed lines
     hunk_added = []    # Buffer for consecutive added lines
-    in_hunk = False
 
     def flush_change_buffer():
         """Process buffered removed/added lines with word-level diff."""
@@ -418,48 +449,78 @@ def parse_and_render_diff(diff_text, diff_label):
         hunk_removed = []
         hunk_added = []
 
-    for raw_line in diff_text.splitlines():
+    # Group the diff into per-file segments so each file can be classified
+    # (binary? oversize?) before anything is rendered.
+    segments = []  # (header_line, body_lines) per "diff --git" section
+    for raw_line in diff_text.split("\n"):
         if raw_line.startswith("diff --git"):
-            flush_change_buffer()
-            if current_file:
-                html_parts.append("</div></details>")
-            # Extract filename
-            match = re.search(r'b/(.+)$', raw_line)
-            current_file = match.group(1) if match else raw_line
-            html_parts.append(
-                f'<details class="diff-file" open>'
-                f'<summary class="diff-file-header">'
-                f'<span class="diff-file-icon">📄</span> {escape(current_file)}'
-                f'<span class="diff-label-pill pill-{diff_label}">{diff_label}</span>'
-                f'</summary>'
-                f'<div class="diff-content">'
-            )
-            in_hunk = False
+            segments.append((raw_line, []))
+        elif segments:
+            segments[-1][1].append(raw_line)
+    if segments and segments[-1][1] and segments[-1][1][-1] == "":
+        segments[-1][1].pop()  # trailing newline artifact of split("\n")
 
-        elif raw_line.startswith("@@"):
-            flush_change_buffer()
-            in_hunk = True
-            html_parts.append(
-                f'<div class="diff-line diff-hunk">{escape(raw_line)}</div>'
-            )
+    for header_line, body_lines in segments:
+        match = re.search(r'b/(.+)$', header_line)
+        current_file = match.group(1) if match else header_line
+        html_parts.append(
+            f'<details class="diff-file" open>'
+            f'<summary class="diff-file-header">'
+            f'<span class="diff-file-icon">📄</span> {escape(current_file)}'
+            f'<span class="diff-label-pill pill-{diff_label}">{diff_label}</span>'
+            f'</summary>'
+            f'<div class="diff-content">'
+        )
 
-        elif in_hunk:
-            if raw_line.startswith("\\"):
-                # Skip "\ No newline at end of file" and similar markers
-                continue
-            elif raw_line.startswith("-"):
-                hunk_removed.append(raw_line[1:])
-            elif raw_line.startswith("+"):
-                hunk_added.append(raw_line[1:])
-            else:
-                # Context line — flush any pending changes first
+        # Displayed lines start at the first hunk header; anything before it
+        # (index, ---/+++, mode lines) is metadata and is not rendered.
+        first_hunk = next(
+            (i for i, l in enumerate(body_lines) if l.startswith("@@")), None
+        )
+        displayed = body_lines[first_hunk:] if first_hunk is not None else []
+
+        suppressed = 0
+        if displayed and _looks_binary("\n".join(displayed)):
+            html_parts.append(
+                f'<div class="diff-line diff-note">Apparent binary file'
+                f' — diff suppressed ({len(displayed):,} lines)</div>'
+            )
+            displayed = []
+        elif len(displayed) > DIFF_FILE_MAX_LINES:
+            suppressed = len(displayed) - DIFF_FILE_SHOWN_LINES
+            displayed = displayed[:DIFF_FILE_SHOWN_LINES]
+
+        in_hunk = False
+        for raw_line in displayed:
+            if raw_line.startswith("@@"):
                 flush_change_buffer()
+                in_hunk = True
                 html_parts.append(
-                    f'<div class="diff-line diff-ctx"> {escape(raw_line[1:] if raw_line.startswith(" ") else raw_line)}</div>'
+                    f'<div class="diff-line diff-hunk">{escape(raw_line)}</div>'
                 )
+            elif in_hunk:
+                if raw_line.startswith("\\"):
+                    # Skip "\ No newline at end of file" and similar markers
+                    continue
+                elif raw_line.startswith("-"):
+                    hunk_removed.append(raw_line[1:])
+                elif raw_line.startswith("+"):
+                    hunk_added.append(raw_line[1:])
+                else:
+                    # Context line — flush any pending changes first
+                    flush_change_buffer()
+                    html_parts.append(
+                        f'<div class="diff-line diff-ctx"> {escape(raw_line[1:] if raw_line.startswith(" ") else raw_line)}</div>'
+                    )
+        flush_change_buffer()
 
-    flush_change_buffer()
-    if current_file:
+        if suppressed:
+            command = {"staged": "git diff --cached",
+                       "unstaged": "git diff"}.get(diff_label, "git diff")
+            html_parts.append(
+                f'<div class="diff-line diff-note">… {suppressed:,} more lines'
+                f' — run {command} to see the rest</div>'
+            )
         html_parts.append("</div></details>")
 
     return "\n".join(html_parts)
@@ -929,6 +990,7 @@ DASHBOARD_CSS = """
     border-left-color: var(--accent);
   }
   .diff-ctx { color: var(--text-dim); }
+  .diff-note { color: var(--text-dim); font-style: italic; padding: 6px 14px; }
 
   /* ── WORD-LEVEL HIGHLIGHTS — the key feature ── */
   mark.wadd {

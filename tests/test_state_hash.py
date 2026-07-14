@@ -48,6 +48,36 @@ def test_hash_changes_for_new_file_in_untracked_directory(gd, repo):
     assert h_one_file != h_two_files
 
 
+def test_hash_survives_non_utf8_diff(gd, repo, git):
+    # ⭐ Regression guard: a real-world PDF had no NUL byte in the first 8000
+    # bytes (git's binary sniff window), so `git diff` rendered its deletion
+    # as *text* — including 0xE2 from the `%âãÏÓ` header line, which is
+    # invalid UTF-8. run_git decoded stdout strictly, so the
+    # UnicodeDecodeError escaped subprocess.run and crashed the dashboard at
+    # startup. Synthetic stand-in: a PDF-ish header with those bytes, NUL-free.
+    doc = repo / "doc.pdf"
+    doc.write_bytes(b"%PDF-1.4\r%\xe2\xe3\xcf\xd3\r\n"
+                    + b"synthetic pdf-ish body line\n" * 4)
+    git("add", "doc.pdf", cwd=repo)
+    git("commit", "-q", "-m", "add pdf-ish doc", cwd=repo)
+    h_clean = gd.compute_state_hash(str(repo))
+    doc.unlink()  # unstaged deletion, as in the original crash
+
+    # Must not raise; undecodable bytes come back as U+FFFD.
+    diff = gd.run_git(["diff"], str(repo))
+    assert "doc.pdf" in diff
+    assert "�" in diff
+
+    # And run_git must not mangle content: subprocess *text mode* applies
+    # universal-newline translation, turning every embedded \r into \n —
+    # which inflated one 11,567-line binary diff to 23,980 lines. The \r
+    # inside the header line must survive as \r.
+    assert "%PDF-1.4\r" in diff
+
+    # And the deletion still registers as a state change.
+    assert gd.compute_state_hash(str(repo)) != h_clean
+
+
 def test_hash_changes_when_edit_is_staged(gd, repo, git):
     # Staging moves the same content from the unstaged-diff component to the
     # staged-diff component; the hash must move with it.
