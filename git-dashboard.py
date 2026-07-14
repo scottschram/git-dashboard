@@ -388,6 +388,12 @@ DIFF_FILE_MAX_LINES = 250    # beyond this, a file's diff is truncated...
 DIFF_FILE_SHOWN_LINES = 200  # ...to this many lines (never hides < 50)
 BINARY_WEIRD_CHAR_RATIO = 0.10
 
+# Header icon for files whose diff isn't rendered (git-detected binary or
+# suppressed as apparent binary); files with a rendered diff get a
+# disclosure triangle instead.
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic",
+                    ".ico", ".bmp", ".tiff", ".tif", ".svg"}
+
 # U+FFFD (run_git's errors="replace" output) and C0 controls other than
 # tab/newline. Latin-1 text decoded as UTF-8 stays under a few percent —
 # one U+FFFD per accented char; binary content lands far above 10%.
@@ -463,14 +469,6 @@ def parse_and_render_diff(diff_text, diff_label):
     for header_line, body_lines in segments:
         match = re.search(r'b/(.+)$', header_line)
         current_file = match.group(1) if match else header_line
-        html_parts.append(
-            f'<details class="diff-file" open>'
-            f'<summary class="diff-file-header">'
-            f'<span class="diff-file-icon">📄</span> {escape(current_file)}'
-            f'<span class="diff-label-pill pill-{diff_label}">{diff_label}</span>'
-            f'</summary>'
-            f'<div class="diff-content">'
-        )
 
         # Displayed lines start at the first hunk header; anything before it
         # (index, ---/+++, mode lines) is metadata and is not rendered.
@@ -478,9 +476,38 @@ def parse_and_render_diff(diff_text, diff_label):
             (i for i, l in enumerate(body_lines) if l.startswith("@@")), None
         )
         displayed = body_lines[first_hunk:] if first_hunk is not None else []
+        is_binary = bool(displayed) and _looks_binary("\n".join(displayed))
+
+        # The disclosure triangle marks headers with an actual diff to
+        # expand; files with nothing readable underneath keep a type icon.
+        # Decided by what the renderer shows, not the extension: a
+        # text-diffed .svg gets the triangle, a text-diffed-but-suppressed
+        # .pdf does not.
+        if displayed and not is_binary:
+            icon = '<span class="diff-disclosure"></span>'
+        elif os.path.splitext(current_file)[1].lower() in IMAGE_EXTENSIONS:
+            icon = '<span class="diff-file-icon">🖼️</span>'
+        else:
+            icon = '<span class="diff-file-icon">📄</span>'
+
+        header = (
+            f'<details class="diff-file" open>'
+            f'<summary class="diff-file-header">'
+            f'{icon} {escape(current_file)}'
+            f'<span class="diff-label-pill pill-{diff_label}">{diff_label}</span>'
+            f'</summary>'
+        )
+
+        if not displayed:
+            # No hunks (git-detected binary, mode change): header only —
+            # an expandable empty box would advertise a pointless click.
+            html_parts.append(header + "</details>")
+            continue
+
+        html_parts.append(header + '<div class="diff-content">')
 
         suppressed = 0
-        if displayed and _looks_binary("\n".join(displayed)):
+        if is_binary:
             html_parts.append(
                 f'<div class="diff-line diff-note">Apparent binary file'
                 f' — diff suppressed ({len(displayed):,} lines)</div>'
@@ -944,6 +971,35 @@ DASHBOARD_CSS = """
   .diff-file-header:hover { background: #1f2e40; }
   .diff-file[open] > .diff-file-header { border-radius: 6px 6px 0 0; }
   .diff-file-icon { flex-shrink: 0; }
+  .diff-disclosure {
+    flex-shrink: 0;
+    width: 1.2em;
+    text-align: center;
+    color: var(--text-dim);
+  }
+  .diff-disclosure::before {
+    content: '▸';
+    display: inline-block;
+    transition: transform 0.15s ease;
+  }
+  .diff-file[open] > .diff-file-header .diff-disclosure::before {
+    transform: rotate(90deg);
+  }
+  .diff-fold-controls { margin-left: auto; display: flex; gap: 6px; }
+  .diff-fold {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .diff-fold:hover { color: var(--text-bright); border-color: var(--accent); }
   .diff-label-pill {
     margin-left: auto;
     font-size: 10px;
@@ -1255,10 +1311,17 @@ def _render_diff_section(is_range, range_label, range_diff_html, range_files,
                          range_insertions, range_deletions, staged_diff_html,
                          unstaged_diff_html, staged_count, modified_count):
     """Full-width Diff Viewer panel — range mode or working-tree mode."""
+    fold = "document.querySelectorAll('details.diff-file').forEach(d=>d.open="
+    fold_controls = (
+        '<span class="diff-fold-controls">'
+        f'<button class="diff-fold" onclick="{fold}true)">Expand all</button>'
+        f'<button class="diff-fold" onclick="{fold}false)">Collapse all</button>'
+        '</span>'
+    )
     diff_section = ""
     if is_range:
         if range_diff_html:
-            diff_section = f'<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — {escape(range_label)}</div>\n'
+            diff_section = f'<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — {escape(range_label)}{fold_controls}</div>\n'
             diff_section += '<div class="panel-body diff-scroll">\n'
             diff_section += f'<div class="diff-section-label">{range_files} file{"s" if range_files != 1 else ""} changed, +{range_insertions} −{range_deletions}</div>\n'
             diff_section += range_diff_html + "\n"
@@ -1271,7 +1334,7 @@ def _render_diff_section(is_range, range_label, range_diff_html, range_files,
                 '</div>'
             )
     elif staged_diff_html or unstaged_diff_html:
-        diff_section = '<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — Word-Level Change Detection</div>\n'
+        diff_section = f'<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — Word-Level Change Detection{fold_controls}</div>\n'
         diff_section += '<div class="panel-body diff-scroll">\n'
 
         if staged_diff_html:

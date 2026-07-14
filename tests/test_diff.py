@@ -401,6 +401,103 @@ def test_render_at_truncation_threshold_shows_everything(gd):
     assert "more lines" not in out
 
 
+# ─── parse_and_render_diff: header icons ────────────────────────────
+# The disclosure triangle (CSS-drawn, in a .diff-disclosure span) marks
+# headers with an actual diff to expand. Files with nothing readable
+# underneath keep a type icon: 🖼️ for images, 📄 otherwise. The choice
+# follows what the renderer decided to show — not the extension, and not
+# whether git produced hunks.
+
+def test_render_text_diff_gets_disclosure_triangle(gd):
+    out = gd.parse_and_render_diff(SINGLE_FILE_DIFF, "unstaged")
+    assert 'class="diff-disclosure"' in out
+    assert "📄" not in out
+
+
+def test_render_binary_collapsed_pdf_keeps_doc_icon(gd):
+    # The weird exception file: a .pdf that git text-diffed (so it HAS
+    # hunks) and that renders with a stub line under the header (so it HAS
+    # text underneath) — but the renderer suppressed its diff, so there is
+    # nothing worth advertising. Doc icon, no arrows.
+    diff = _deletion_diff("AUM_20120406.pdf", ["%PDF-1.4", "str\x00eam"])
+    out = gd.parse_and_render_diff(diff, "staged")
+    assert "Apparent binary file" in out
+    assert "📄" in out
+    assert "diff-disclosure" not in out
+
+
+def test_render_hunkless_image_gets_image_icon_and_no_body(gd):
+    # Git's own binary detection: no hunks at all, just a "Binary files
+    # differ" notice (which is not rendered). Previously this produced an
+    # expandable *empty* box; now there is no content div at all.
+    diff = (
+        "diff --git a/photos/cover.JPG b/photos/cover.JPG\n"
+        "deleted file mode 100644\n"
+        "index 1111111..0000000\n"
+        "Binary files a/photos/cover.JPG and /dev/null differ\n"
+    )
+    out = gd.parse_and_render_diff(diff, "staged")
+    assert "🖼️" in out
+    assert "diff-disclosure" not in out
+    assert '<div class="diff-content">' not in out
+    assert out.rstrip().endswith("</details>")
+
+
+def test_render_hunkless_non_image_keeps_doc_icon(gd):
+    diff = (
+        "diff --git a/notes.docx b/notes.docx\n"
+        "index 1111111..2222222 100644\n"
+        "Binary files a/notes.docx and b/notes.docx differ\n"
+    )
+    out = gd.parse_and_render_diff(diff, "unstaged")
+    assert "📄" in out
+    assert "🖼️" not in out
+    assert "diff-disclosure" not in out
+
+
+def test_render_text_diffed_svg_gets_triangle_not_image_icon(gd):
+    # SVG is an image by extension but text to git: when a real diff is
+    # rendered, the clickability affordance wins over the type icon.
+    diff = (
+        "diff --git a/logo.svg b/logo.svg\n"
+        "--- a/logo.svg\n"
+        "+++ b/logo.svg\n"
+        "@@ -1 +1 @@\n"
+        '-<circle r="4"/>\n'
+        '+<circle r="5"/>\n'
+    )
+    out = gd.parse_and_render_diff(diff, "unstaged")
+    assert 'class="diff-disclosure"' in out
+    assert "🖼️" not in out
+
+
+# ─── _render_diff_section: expand/collapse-all controls ─────────────
+
+def test_diff_section_header_has_fold_controls(gd):
+    out = gd._render_diff_section(
+        False, "", "", 0, 0, 0,
+        '<details class="diff-file"></details>', "", 1, 0,
+    )
+    assert "Expand all" in out
+    assert "Collapse all" in out
+
+
+def test_range_diff_section_header_has_fold_controls(gd):
+    out = gd._render_diff_section(
+        True, "v1..v2", '<details class="diff-file"></details>', 1, 2, 3,
+        "", "", 0, 0,
+    )
+    assert "Expand all" in out
+    assert "Collapse all" in out
+
+
+def test_empty_diff_section_has_no_fold_controls(gd):
+    # Nothing to fold — the controls would be dead weight on an empty panel.
+    out = gd._render_diff_section(False, "", "", 0, 0, 0, "", "", 0, 0)
+    assert "Expand all" not in out
+    assert "Collapse all" not in out
+
+
 def test_render_splits_on_newline_only(gd):
     # str.splitlines() also splits on \x0b, \x0c, \x85, etc. — control
     # characters that binary content embeds *inside* a git line. That

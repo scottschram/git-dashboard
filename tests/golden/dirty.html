@@ -401,6 +401,35 @@
   .diff-file-header:hover { background: #1f2e40; }
   .diff-file[open] > .diff-file-header { border-radius: 6px 6px 0 0; }
   .diff-file-icon { flex-shrink: 0; }
+  .diff-disclosure {
+    flex-shrink: 0;
+    width: 1.2em;
+    text-align: center;
+    color: var(--text-dim);
+  }
+  .diff-disclosure::before {
+    content: '▸';
+    display: inline-block;
+    transition: transform 0.15s ease;
+  }
+  .diff-file[open] > .diff-file-header .diff-disclosure::before {
+    transform: rotate(90deg);
+  }
+  .diff-fold-controls { margin-left: auto; display: flex; gap: 6px; }
+  .diff-fold {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .diff-fold:hover { color: var(--text-bright); border-color: var(--accent); }
   .diff-label-pill {
     margin-left: auto;
     font-size: 10px;
@@ -528,17 +557,17 @@
 </div></div></div>
   </div>
 
-  <div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — Word-Level Change Detection</div>
+  <div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — Word-Level Change Detection<span class="diff-fold-controls"><button class="diff-fold" onclick="document.querySelectorAll('details.diff-file').forEach(d=>d.open=true)">Expand all</button><button class="diff-fold" onclick="document.querySelectorAll('details.diff-file').forEach(d=>d.open=false)">Collapse all</button></span></div>
 <div class="panel-body diff-scroll">
 <div class="diff-section-label">Staged Changes (1 file)</div>
-<details class="diff-file" open><summary class="diff-file-header"><span class="diff-file-icon">📄</span> b.txt<span class="diff-label-pill pill-staged">staged</span></summary><div class="diff-content">
+<details class="diff-file" open><summary class="diff-file-header"><span class="diff-disclosure"></span> b.txt<span class="diff-label-pill pill-staged">staged</span></summary><div class="diff-content">
 <div class="diff-line diff-hunk">@@ -1 +1 @@</div>
 <div class="diff-line diff-del">-value = <mark class="wdel">1</mark></div>
 <div class="diff-line diff-add">+value = <mark class="wadd">2</mark></div>
 </div></details>
 <div class="diff-divider"></div>
 <div class="diff-section-label">Unstaged Changes (1 file)</div>
-<details class="diff-file" open><summary class="diff-file-header"><span class="diff-file-icon">📄</span> a.txt<span class="diff-label-pill pill-unstaged">unstaged</span></summary><div class="diff-content">
+<details class="diff-file" open><summary class="diff-file-header"><span class="diff-disclosure"></span> a.txt<span class="diff-label-pill pill-unstaged">unstaged</span></summary><div class="diff-content">
 <div class="diff-line diff-hunk">@@ -1 +1 @@</div>
 <div class="diff-line diff-del">-hello world</div>
 <div class="diff-line diff-add">+hello <mark class="wadd">brave </mark>world</div>
