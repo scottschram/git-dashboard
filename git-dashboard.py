@@ -1486,7 +1486,9 @@ def compute_state_hash(repo_path):
 
     The default branch ref (origin/main or local main) is included so the
     bottom "main" card refreshes when collaborators push to main, or when
-    main moves in a parallel terminal session in a no-remote repo.
+    main moves in a parallel terminal session in a no-remote repo. Note the
+    remote-tracking refs only move when a fetch runs, and fetch is deliberately
+    not on an idle timer — see README "When remote changes appear".
 
     --untracked-files=all is required: the default ("normal") collapses
     untracked directories to a single entry, so adding a file inside an

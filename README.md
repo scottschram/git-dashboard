@@ -70,6 +70,29 @@ In watch mode the dashboard polls every 5 seconds. When the repo state changes (
 
 The one-shot modes (`--once`, `--range`) write the dashboard HTML to `/tmp/<repo-name>-git-dashboard.html` and open it via `file://`. Useful in scripts and CI; the browser tab is static and won't auto-refresh.
 
+## When remote changes appear
+
+The dashboard never fetches on an idle timer. `git fetch` runs in exactly two
+situations: when something changes locally (any edit, stage, or commit
+triggers a rebuild, which fetches first), and when you click the ↻ button.
+
+In practice the remote-tracking info is fresh whenever you're actually
+working — every local edit piggybacks a fetch, so the ahead/behind counts and
+the main card keep up. The one stale case is a fully idle repo: you step
+away, a collaborator pushes, and the dashboard sits unchanged until your next
+edit or a manual ↻.
+
+This is a deliberate trade-off, not an oversight. The alternative is hitting
+the network every minute, forever, from every open dashboard — and the event
+it would catch is not only rare but self-limiting. Suppose you come back from
+lunch, glance at a green dashboard, and commit anyway: the commit itself is a
+local change, so within seconds the dashboard rebuilds, fetches, and shows
+you're behind — before you've pushed. And if you push regardless, git rejects
+it as non-fast-forward and tells you to pull first. The stale dashboard can
+mislead you only while the repo sits untouched; the moment you act, it
+corrects itself, with git's push rejection as the backstop. Nothing is ever
+lost. If you're expecting a push, click ↻.
+
 ## Requirements
 
 - macOS
