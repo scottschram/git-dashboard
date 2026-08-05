@@ -1,10 +1,11 @@
 """
 derive_github_url — the pure GitHub-URL helper extracted in Phase 2
-(previously inline in collect_repo_info; FINDINGS entry 1).
+(previously inline in repo collection; FINDINGS entry 1).
 
-These are plain-string unit tests: no repo, no network. The
-collect_repo_info integration side is covered by the Phase 1 suite, which
-pins the negative case (local filesystem remote -> github_url == "").
+These are plain-string unit tests: no repo, no network. The integration
+side — RepoSnapshot.github_url, which derives from remote_url — is covered
+by the Phase 1 suite, which pins the negative case (local filesystem
+remote -> github_url == "").
 """
 
 import pytest
@@ -23,7 +24,7 @@ import pytest
         ("git@github.com:user/repo", "https://github.com/user/repo"),
         # Non-GitHub remotes yield no URL
         ("git@gitlab.com:user/repo.git", ""),
-        # The placeholder collect_repo_info uses when there is no origin
+        # The placeholder RepoSnapshot.from_repo uses with no origin
         ("No remote", ""),
     ],
 )

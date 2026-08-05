@@ -38,6 +38,7 @@ import hashlib
 import queue
 import threading
 import string
+from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
 from html import escape
@@ -121,147 +122,210 @@ def derive_github_url(remote_url):
     return gh
 
 
-def collect_repo_info(repo_path):
-    """Collect all repository metadata."""
-    info = {}
-    info["repo_name"] = os.path.basename(
-        run_git(["rev-parse", "--show-toplevel"], repo_path) or repo_path
-    )
-    info["branch"] = run_git(["branch", "--show-current"], repo_path) or "detached"
-    info["last_hash"] = run_git(["log", "-1", "--format=%h"], repo_path) or "none"
-    info["last_msg"] = run_git(["log", "-1", "--format=%s"], repo_path) or "No commits yet"
-    info["last_date"] = run_git(["log", "-1", "--format=%ar"], repo_path) or "never"
-    info["last_author"] = run_git(["log", "-1", "--format=%an"], repo_path) or "unknown"
-    info["total_commits"] = run_git(["rev-list", "--count", "HEAD"], repo_path) or "0"
+# ─── Repo Snapshot ──────────────────────────────────────────────────
 
-    # Remote info
-    info["remote_url"] = run_git(["remote", "get-url", "origin"], repo_path) or "No remote"
-    info["tracking"] = run_git(
-        ["for-each-ref", "--format=%(upstream:short)", f"refs/heads/{info['branch']}"],
-        repo_path
-    ) or ""
+# One log line, as `--format=%h\t%H\t%s\t%ar` emits it.
+LOG_FORMAT = "%h\t%H\t%s\t%ar"
 
-    # Fetch quietly for accurate ahead/behind
-    run_git(["fetch", "--quiet"], repo_path)
 
-    # A branch can be *configured* to track a ref that no longer resolves —
-    # remote branch deleted and pruned, say. rev-list against a gone ref
-    # exits non-zero, run_git returns "", and 0/0 would render as a false
-    # green "In sync". Detect the state explicitly (after the fetch, which
-    # may prune or restore the ref) and report it instead.
-    info["tracking_gone"] = bool(info["tracking"]) and not run_git(
-        ["rev-parse", "--verify", "--quiet", info["tracking"]], repo_path
-    )
+@dataclass(frozen=True)
+class Commit:
+    """One commit, exactly as a commit row shows it."""
 
-    info["ahead"] = 0
-    info["behind"] = 0
-    info["sync_status"] = "No remote tracking"
-    if info["tracking_gone"]:
-        info["sync_status"] = "Upstream gone"
-    elif info["tracking"]:
-        ahead = run_git(["rev-list", "--count", f"{info['tracking']}..HEAD"], repo_path)
-        behind = run_git(["rev-list", "--count", f"HEAD..{info['tracking']}"], repo_path)
-        info["ahead"] = int(ahead) if ahead.isdigit() else 0
-        info["behind"] = int(behind) if behind.isdigit() else 0
-        a, b = info["ahead"], info["behind"]
-        if a == 0 and b == 0:
-            info["sync_status"] = "In sync"
-        elif a > 0 and b > 0:
-            info["sync_status"] = "Diverged"
-        elif a > 0:
-            info["sync_status"] = "Ahead"
-        else:
-            info["sync_status"] = "Behind"
+    hash: str = ""        # abbreviated — the displayed hash
+    full_hash: str = ""   # full — GitHub links, and unpushed/behind membership
+    msg: str = ""         # subject line
+    date: str = ""        # git's %ar relative date ("3 days ago")
 
-    # Default branch info — used by the bottom "main" card on feature
-    # branches. ref may be origin/main or local main; see find_default_ref.
-    default_name, default_ref = find_default_ref(repo_path)
-    info["default_branch"] = default_name
-    info["default_ref"] = default_ref
-    info["show_main_card"] = bool(default_ref and default_name != info["branch"])
 
-    info["main_recent_commits"] = []
-    info["behind_main_hashes"] = set()
-    if info["show_main_card"]:
-        behind = run_git(["rev-list", f"HEAD..{default_ref}"], repo_path)
-        if behind:
-            info["behind_main_hashes"] = set(behind.splitlines())
-        main_log = run_git(
-            ["log", "-12", "--format=%h\t%H\t%s\t%ar", default_ref], repo_path
-        )
-        # Main isn't the focus on a feature branch — show all the "new on main"
-        # commits we can fit (up to 12), but cap "already in my branch" context
-        # at 6 entries. If there are >12 behind commits, the badge still shows
-        # the true count even though the list is capped.
-        IN_SYNC_CAP = 6
-        in_sync_seen = 0
-        for line in (main_log.splitlines() if main_log else []):
-            parts = line.split("\t", 3)
-            if len(parts) != 4:
-                continue
-            is_behind = parts[1] in info["behind_main_hashes"]
-            if not is_behind:
-                in_sync_seen += 1
-                if in_sync_seen > IN_SYNC_CAP:
-                    break
-            info["main_recent_commits"].append({
-                "hash": parts[0], "full_hash": parts[1],
-                "msg": parts[2], "date": parts[3],
-            })
-    info["behind_main"] = len(info["behind_main_hashes"])
-
-    # Stash count
-    stash = run_git(["stash", "list"], repo_path)
-    info["stash_count"] = len(stash.splitlines()) if stash else 0
-
-    # File counts
-    staged = run_git(["diff", "--cached", "--name-only"], repo_path)
-    modified = run_git(["diff", "--name-only"], repo_path)
-    untracked = run_git(["ls-files", "--others", "--exclude-standard"], repo_path)
-    info["staged_files"] = staged.splitlines() if staged else []
-    info["modified_files"] = modified.splitlines() if modified else []
-    info["untracked_files"] = untracked.splitlines() if untracked else []
-
-    # Detailed status with flags
-    info["staged_status"] = run_git(["diff", "--cached", "--name-status"], repo_path)
-    info["modified_status"] = run_git(["diff", "--name-status"], repo_path)
-
-    # Unpushed commit hashes (full hashes for reliable comparison)
-    info["unpushed_hashes"] = set()
-    if info["tracking_gone"]:
-        # The upstream ref is gone, so no local commit can be on it —
-        # every commit counts as unpushed.
-        all_hashes = run_git(["rev-list", "HEAD"], repo_path)
-        if all_hashes:
-            info["unpushed_hashes"] = set(all_hashes.splitlines())
-    elif info["tracking"]:
-        unpushed = run_git(["rev-list", f"{info['tracking']}..HEAD"], repo_path)
-        if unpushed:
-            info["unpushed_hashes"] = set(unpushed.splitlines())
-
-    # Recent commits (include full hash for GitHub links). On a feature branch
-    # we only show commits unique to the branch — anything already on main
-    # belongs in the bottom "main" card, not duplicated here.
-    if info["show_main_card"]:
-        log = run_git(
-            ["log", "-12", "--format=%h\t%H\t%s\t%ar", f"{default_ref}..HEAD"],
-            repo_path,
-        )
-    else:
-        log = run_git(["log", "--oneline", "-12", "--format=%h\t%H\t%s\t%ar"], repo_path)
-    info["recent_commits"] = []
-    for line in (log.splitlines() if log else []):
+def _parse_log(log_output):
+    """Turn LOG_FORMAT output into Commits, skipping any malformed line."""
+    commits = []
+    for line in (log_output.splitlines() if log_output else []):
         parts = line.split("\t", 3)
         if len(parts) == 4:
-            info["recent_commits"].append({
-                "hash": parts[0], "full_hash": parts[1],
-                "msg": parts[2], "date": parts[3]
-            })
+            commits.append(Commit(hash=parts[0], full_hash=parts[1],
+                                  msg=parts[2], date=parts[3]))
+    return commits
 
-    # Derive GitHub web URL from remote
-    info["github_url"] = derive_github_url(info["remote_url"])
 
-    return info
+@dataclass(frozen=True)
+class RepoSnapshot:
+    """Everything the dashboard knows about a repository at one instant.
+
+    This is the renderers' whole interface to git: every panel takes a
+    snapshot and reads named fields off it, so a test can build one
+    literally — no repository on disk — and render from it. RepoSnapshot
+    itself runs no git; from_repo is the single adapter that does.
+
+    Frozen, because a snapshot is a fact about a moment. Derive a variant
+    with dataclasses.replace (the golden tests pin generated_at and the
+    %ar relative dates that way).
+
+    Every field defaults to its "nothing there" value, so a literal
+    snapshot only spells out the facts the test is about. from_repo
+    supplies the display fallbacks ("detached", "No remote") that a live
+    repo needs and an empty snapshot doesn't.
+    """
+
+    # When the snapshot was taken — the header's "Generated ..." stamp.
+    # Carried here rather than read from the clock at render time, which
+    # is what keeps generate_html pure.
+    generated_at: datetime = field(default_factory=datetime.now)
+
+    # Identity
+    repo_name: str = ""
+    branch: str = ""
+    remote_url: str = ""
+
+    # Upstream: the configured ref, whether it still resolves, and the
+    # distance to it. See from_repo for why "gone" is its own field.
+    tracking: str = ""
+    tracking_gone: bool = False
+    ahead: int = 0
+    behind: int = 0
+    unpushed_hashes: set[str] = field(default_factory=set)  # full hashes
+
+    # Default branch — the bottom "main" card. ref may be origin/main or
+    # local main; see find_default_ref.
+    default_branch: str = ""
+    default_ref: str = ""
+    behind_main_hashes: set[str] = field(default_factory=set)  # full hashes
+    main_recent_commits: list[Commit] = field(default_factory=list)
+
+    # Working tree
+    stash_count: int = 0
+    staged_files: list[str] = field(default_factory=list)
+    modified_files: list[str] = field(default_factory=list)
+    untracked_files: list[str] = field(default_factory=list)
+    staged_status: str = ""    # raw `diff --cached --name-status` text
+    modified_status: str = ""  # raw `diff --name-status` text
+
+    # Branch history
+    recent_commits: list[Commit] = field(default_factory=list)
+
+    @property
+    def github_url(self):
+        """Browsable GitHub URL, or "" for a non-GitHub remote."""
+        return derive_github_url(self.remote_url)
+
+    @property
+    def show_main_card(self):
+        """True when HEAD is somewhere other than a resolvable default branch —
+        the only condition under which the bottom card has anything to say."""
+        return bool(self.default_ref and self.default_branch != self.branch)
+
+    @property
+    def behind_main(self):
+        return len(self.behind_main_hashes)
+
+    @classmethod
+    def from_repo(cls, repo_path):
+        """Take a snapshot of a repository. The only place git is run for
+        repo metadata."""
+        branch = run_git(["branch", "--show-current"], repo_path) or "detached"
+        remote_url = run_git(["remote", "get-url", "origin"], repo_path) or "No remote"
+        tracking = run_git(
+            ["for-each-ref", "--format=%(upstream:short)", f"refs/heads/{branch}"],
+            repo_path
+        ) or ""
+
+        # Fetch quietly for accurate ahead/behind
+        run_git(["fetch", "--quiet"], repo_path)
+
+        # A branch can be *configured* to track a ref that no longer resolves —
+        # remote branch deleted and pruned, say. rev-list against a gone ref
+        # exits non-zero, run_git returns "", and 0/0 would render as a false
+        # green "In sync". Detect the state explicitly (after the fetch, which
+        # may prune or restore the ref) and report it instead.
+        tracking_gone = bool(tracking) and not run_git(
+            ["rev-parse", "--verify", "--quiet", tracking], repo_path
+        )
+
+        ahead = behind = 0
+        if tracking and not tracking_gone:
+            ahead_out = run_git(["rev-list", "--count", f"{tracking}..HEAD"], repo_path)
+            behind_out = run_git(["rev-list", "--count", f"HEAD..{tracking}"], repo_path)
+            ahead = int(ahead_out) if ahead_out.isdigit() else 0
+            behind = int(behind_out) if behind_out.isdigit() else 0
+
+        # Unpushed commit hashes (full hashes for reliable comparison)
+        unpushed_hashes = set()
+        if tracking_gone:
+            # The upstream ref is gone, so no local commit can be on it —
+            # every commit counts as unpushed.
+            all_hashes = run_git(["rev-list", "HEAD"], repo_path)
+            if all_hashes:
+                unpushed_hashes = set(all_hashes.splitlines())
+        elif tracking:
+            unpushed = run_git(["rev-list", f"{tracking}..HEAD"], repo_path)
+            if unpushed:
+                unpushed_hashes = set(unpushed.splitlines())
+
+        default_name, default_ref = find_default_ref(repo_path)
+        show_main_card = bool(default_ref and default_name != branch)
+
+        main_recent_commits = []
+        behind_main_hashes = set()
+        if show_main_card:
+            behind_main_out = run_git(["rev-list", f"HEAD..{default_ref}"], repo_path)
+            if behind_main_out:
+                behind_main_hashes = set(behind_main_out.splitlines())
+            # Main isn't the focus on a feature branch — show all the "new on
+            # main" commits we can fit (up to 12), but cap "already in my
+            # branch" context at 6 entries. If there are >12 behind commits,
+            # the badge still shows the true count even though the list is
+            # capped.
+            IN_SYNC_CAP = 6
+            in_sync_seen = 0
+            for c in _parse_log(run_git(
+                    ["log", "-12", f"--format={LOG_FORMAT}", default_ref], repo_path)):
+                if c.full_hash not in behind_main_hashes:
+                    in_sync_seen += 1
+                    if in_sync_seen > IN_SYNC_CAP:
+                        break
+                main_recent_commits.append(c)
+
+        # Recent commits (include full hash for GitHub links). On a feature
+        # branch we only show commits unique to the branch — anything already
+        # on main belongs in the bottom "main" card, not duplicated here.
+        if show_main_card:
+            log = run_git(
+                ["log", "-12", f"--format={LOG_FORMAT}", f"{default_ref}..HEAD"],
+                repo_path,
+            )
+        else:
+            log = run_git(["log", "--oneline", "-12", f"--format={LOG_FORMAT}"],
+                          repo_path)
+
+        stash = run_git(["stash", "list"], repo_path)
+        staged = run_git(["diff", "--cached", "--name-only"], repo_path)
+        modified = run_git(["diff", "--name-only"], repo_path)
+        untracked = run_git(["ls-files", "--others", "--exclude-standard"], repo_path)
+
+        return cls(
+            repo_name=os.path.basename(
+                run_git(["rev-parse", "--show-toplevel"], repo_path) or repo_path
+            ),
+            branch=branch,
+            remote_url=remote_url,
+            tracking=tracking,
+            tracking_gone=tracking_gone,
+            ahead=ahead,
+            behind=behind,
+            unpushed_hashes=unpushed_hashes,
+            default_branch=default_name,
+            default_ref=default_ref,
+            behind_main_hashes=behind_main_hashes,
+            main_recent_commits=main_recent_commits,
+            stash_count=len(stash.splitlines()) if stash else 0,
+            staged_files=staged.splitlines() if staged else [],
+            modified_files=modified.splitlines() if modified else [],
+            untracked_files=untracked.splitlines() if untracked else [],
+            staged_status=run_git(["diff", "--cached", "--name-status"], repo_path),
+            modified_status=run_git(["diff", "--name-status"], repo_path),
+            recent_commits=_parse_log(log),
+        )
 
 
 # ─── Word-Level Diff Engine ─────────────────────────────────────────
@@ -636,10 +700,10 @@ class DiffView:
 class WorkingTreeDiffs(DiffView):
     """Uncommitted work: what is staged and what is not."""
 
-    def __init__(self, repo_path, info):
-        staged_count = len(info["staged_files"])
-        modified_count = len(info["modified_files"])
-        untracked_count = len(info["untracked_files"])
+    def __init__(self, repo_path, snap):
+        staged_count = len(snap.staged_files)
+        modified_count = len(snap.modified_files)
+        untracked_count = len(snap.untracked_files)
 
         sections = []
         staged_html = parse_and_render_diff(
@@ -700,12 +764,12 @@ class RangeDiffs(DiffView):
         )
 
 
-def build_diff_view(repo_path, range_spec, info):
+def build_diff_view(repo_path, range_spec, snap):
     """Pick the adapter for this run. The only place the range-vs-working-tree
     question is asked."""
     if range_spec is not None:
         return RangeDiffs(repo_path, range_spec)
-    return WorkingTreeDiffs(repo_path, info)
+    return WorkingTreeDiffs(repo_path, snap)
 
 
 # ─── HTML Generation ────────────────────────────────────────────────
@@ -1258,7 +1322,7 @@ PAGE_TEMPLATE = string.Template('''<!DOCTYPE html>
 </html>''')
 
 
-def _render_file_status(info, live, repo_path):
+def _render_file_status(snap, live, repo_path):
     """Working Tree Status panel body — staged/modified/untracked rows."""
     def status_badge(line, default_label, default_class):
         # name-status lines start with a status code (M, A, D, R100, ...) + tab
@@ -1275,15 +1339,15 @@ def _render_file_status(info, live, repo_path):
         return ""
 
     file_status_html = ""
-    for line in (info["staged_status"].splitlines() if info["staged_status"] else []):
+    for line in (snap.staged_status.splitlines() if snap.staged_status else []):
         label, cls = status_badge(line, "staged", "badge-staged")
         attr = open_attr(line.split("\t")[-1])
         file_status_html += f'<div class="file-entry"{attr}><span class="file-badge {cls}">{label}</span> {escape(line)}</div>\n'
-    for line in (info["modified_status"].splitlines() if info["modified_status"] else []):
+    for line in (snap.modified_status.splitlines() if snap.modified_status else []):
         label, cls = status_badge(line, "modified", "badge-modified")
         attr = open_attr(line.split("\t")[-1])
         file_status_html += f'<div class="file-entry"{attr}><span class="file-badge {cls}">{label}</span> {escape(line)}</div>\n'
-    for f in info["untracked_files"]:
+    for f in snap.untracked_files:
         attr = open_attr(f)
         file_status_html += f'<div class="file-entry"{attr}><span class="file-badge badge-untracked">untracked</span> {escape(f)}</div>\n'
 
@@ -1292,34 +1356,34 @@ def _render_file_status(info, live, repo_path):
     return file_status_html
 
 
-def _render_commits(info, github_url):
+def _render_commits(snap, github_url):
     """Branch commit rows — unpushed highlighted, pushed linked to GitHub."""
     commits_html = ""
-    for c in info["recent_commits"]:
-        is_unpushed = c["full_hash"] in info["unpushed_hashes"]
+    for c in snap.recent_commits:
+        is_unpushed = c.full_hash in snap.unpushed_hashes
         entry_class = "commit-entry commit-unpushed" if is_unpushed else "commit-entry"
 
         if is_unpushed or not github_url:
-            hash_html = f'<span class="commit-hash">{escape(c["hash"])}</span>'
+            hash_html = f'<span class="commit-hash">{escape(c.hash)}</span>'
         else:
-            commit_url = f'{github_url}/commit/{c["full_hash"]}'
-            hash_html = f'<a class="commit-hash commit-link" href="{escape(commit_url)}" target="_blank">{escape(c["hash"])}</a>'
+            commit_url = f'{github_url}/commit/{c.full_hash}'
+            hash_html = f'<a class="commit-hash commit-link" href="{escape(commit_url)}" target="_blank">{escape(c.hash)}</a>'
 
         commits_html += (
             f'<div class="{entry_class}">'
             f'{hash_html}'
-            f'<span class="commit-msg">{escape(c["msg"])}</span>'
-            f'<span class="commit-date">{escape(c["date"])}</span>'
+            f'<span class="commit-msg">{escape(c.msg)}</span>'
+            f'<span class="commit-date">{escape(c.date)}</span>'
             f'</div>\n'
         )
     return commits_html
 
 
-def _render_branch_panel(info, commits_html):
+def _render_branch_panel(snap, commits_html):
     """Top-right panel: current-branch commits plus a sync-status badge."""
-    ahead, behind = info["ahead"], info["behind"]
+    ahead, behind = snap.ahead, snap.behind
     sync_parts = []
-    if info["tracking_gone"]:
+    if snap.tracking_gone:
         # Upstream configured but its ref is gone — ahead/behind are
         # uncomputable, and 0/0 must not read as "In sync". Reuses the
         # yellow sync-ahead style (matches the all-commits-unpushed
@@ -1331,13 +1395,13 @@ def _render_branch_panel(info, commits_html):
             sync_parts.append(f'<span class="sync-badge sync-ahead">↑ {ahead} unpushed</span>')
         if behind > 0:
             sync_parts.append(f'<span class="sync-badge sync-behind">↓ {behind} behind</span>')
-    elif info["tracking"]:
+    elif snap.tracking:
         sync_parts.append('<span class="sync-badge sync-ok">In sync</span>')
     else:
         sync_parts.append('<span class="sync-badge sync-notrack">No remote</span>')
     commits_header_extra = " ".join(sync_parts)
 
-    show_main = info["show_main_card"]
+    show_main = snap.show_main_card
     branch_title = "⎇ Branch" if show_main else "📜 Recent Commits"
     if show_main and not commits_html:
         branch_body = '<div class="panel-empty">No commits on this branch yet</div>'
@@ -1352,13 +1416,13 @@ def _render_branch_panel(info, commits_html):
     return branch_panel_html
 
 
-def _render_main_panel(info, github_url):
+def _render_main_panel(snap, github_url):
     """Bottom-right panel: HEAD versus the default branch."""
-    show_main = info["show_main_card"]
+    show_main = snap.show_main_card
     main_panel_html = ""
     if show_main:
-        default_name = info["default_branch"]
-        behind = info["behind_main"]
+        default_name = snap.default_branch
+        behind = snap.behind_main
         if behind > 0:
             main_badge = (
                 f'<span class="sync-badge sync-behind">'
@@ -1371,26 +1435,26 @@ def _render_main_panel(info, github_url):
             )
 
         main_commits_html = ""
-        behind_hashes = info["behind_main_hashes"]
-        for c in info["main_recent_commits"]:
-            is_behind = c["full_hash"] in behind_hashes
+        behind_hashes = snap.behind_main_hashes
+        for c in snap.main_recent_commits:
+            is_behind = c.full_hash in behind_hashes
             entry_class = (
                 "commit-entry commit-behind-main" if is_behind else "commit-entry"
             )
             if github_url:
-                commit_url = f'{github_url}/commit/{c["full_hash"]}'
+                commit_url = f'{github_url}/commit/{c.full_hash}'
                 hash_html = (
                     f'<a class="commit-hash commit-link" '
                     f'href="{escape(commit_url)}" target="_blank">'
-                    f'{escape(c["hash"])}</a>'
+                    f'{escape(c.hash)}</a>'
                 )
             else:
-                hash_html = f'<span class="commit-hash">{escape(c["hash"])}</span>'
+                hash_html = f'<span class="commit-hash">{escape(c.hash)}</span>'
             main_commits_html += (
                 f'<div class="{entry_class}">'
                 f'{hash_html}'
-                f'<span class="commit-msg">{escape(c["msg"])}</span>'
-                f'<span class="commit-date">{escape(c["date"])}</span>'
+                f'<span class="commit-msg">{escape(c.msg)}</span>'
+                f'<span class="commit-date">{escape(c.date)}</span>'
                 f'</div>\n'
             )
         if not main_commits_html:
@@ -1405,14 +1469,14 @@ def _render_main_panel(info, github_url):
     return main_panel_html
 
 
-def _render_stats_row(info, view):
+def _render_stats_row(snap, view):
     """Compact stat cards — the view supplies the leading three, the repo
     supplies the Stashes card that follows them."""
     def zero_class(n):
         return " zero" if n == 0 else ""
 
     cards = view.stat_cards + [
-        ("Stashes", "stash", info["stash_count"], str(info["stash_count"])),
+        ("Stashes", "stash", snap.stash_count, str(snap.stash_count)),
     ]
     return "".join(f'''
     <div class="stat-card {css_class}">
@@ -1452,39 +1516,40 @@ def _render_diff_section(view):
     return diff_section
 
 
-def generate_html(info, repo_path, view, live=False):
+def generate_html(snap, repo_path, view, live=False):
     """Generate the complete dashboard HTML.
 
-    Pure: every diff and stat comes in through `view` (a DiffView), so this
-    runs no git and knows nothing about range vs working-tree mode.
-    repo_path is display material — the header path and the reveal links.
+    Pure: every repo fact comes in through `snap` (a RepoSnapshot) and every
+    diff and stat through `view` (a DiffView), so this runs no git, reads no
+    clock, and knows nothing about range vs working-tree mode. repo_path is
+    display material — the header path and the reveal links.
     """
-    github_url = info["github_url"]
+    github_url = snap.github_url
 
     # Assemble the page fragments, then fill the page template.
-    file_status_html = _render_file_status(info, live, repo_path)
-    commits_html = _render_commits(info, github_url)
-    branch_panel_html = _render_branch_panel(info, commits_html)
-    main_panel_html = _render_main_panel(info, github_url)
+    file_status_html = _render_file_status(snap, live, repo_path)
+    commits_html = _render_commits(snap, github_url)
+    branch_panel_html = _render_branch_panel(snap, commits_html)
+    main_panel_html = _render_main_panel(snap, github_url)
     right_column_html = (
         f'<div class="right-stack">{branch_panel_html}{main_panel_html}</div>'
     )
     diff_section = _render_diff_section(view)
-    stats_row_html = _render_stats_row(info, view)
+    stats_row_html = _render_stats_row(snap, view)
 
-    now = datetime.now().strftime("%B %d, %Y at %I:%M:%S %p")
+    now = snap.generated_at.strftime("%B %d, %Y at %I:%M:%S %p")
 
     # Repo name — linked to GitHub if available
-    if info["github_url"]:
-        repo_name_html = f'<a class="repo-name" href="{escape(info["github_url"])}" target="_blank">{escape(info["repo_name"])}</a>'
+    if github_url:
+        repo_name_html = f'<a class="repo-name" href="{escape(github_url)}" target="_blank">{escape(snap.repo_name)}</a>'
     else:
-        repo_name_html = f'<div class="repo-name">{escape(info["repo_name"])}</div>'
+        repo_name_html = f'<div class="repo-name">{escape(snap.repo_name)}</div>'
 
     # Branch pill — just the branch name, unless it tracks a non-obvious
     # upstream (a fork's upstream, a differently-named remote branch, …), in
     # which case show "branch → upstream" so the mismatch is visible.
-    branch = info["branch"]
-    tracking = info["tracking"]
+    branch = snap.branch
+    tracking = snap.tracking
     if tracking and tracking != f"origin/{branch}":
         branch_label = f"{branch} → {tracking}"
     else:
@@ -1510,12 +1575,12 @@ def generate_html(info, repo_path, view, live=False):
 
     html = PAGE_TEMPLATE.substitute(
         css=DASHBOARD_CSS,
-        title=escape(info["repo_name"]),
+        title=escape(snap.repo_name),
         repo_name=repo_name_html,
         branch_label=escape(branch_label),
         refresh=refresh_html,
         now=now,
-        remote=escape(info["remote_url"]),
+        remote=escape(snap.remote_url),
         path=path_html,
         terminal=terminal_html,
         stats_row=stats_row_html,
@@ -1625,10 +1690,10 @@ class WatchState:
 
     def regenerate(self):
         """Rebuild the dashboard HTML from current repo state."""
-        info = collect_repo_info(self.repo_path)
-        self._rebuild_allowed_paths(info)
-        view = build_diff_view(self.repo_path, self.range_spec, info)
-        html = generate_html(info, self.repo_path, view, live=True)
+        snap = RepoSnapshot.from_repo(self.repo_path)
+        self._rebuild_allowed_paths(snap)
+        view = build_diff_view(self.repo_path, self.range_spec, snap)
+        html = generate_html(snap, self.repo_path, view, live=True)
         html = inject_watch_script(html)
         with self.html_lock:
             self.html = html.encode("utf-8")
@@ -1649,12 +1714,12 @@ class WatchState:
         timestamp = datetime.now().strftime("%H:%M:%S")
         print(f"[{timestamp}] Refreshed (manual)", flush=True)
 
-    def _rebuild_allowed_paths(self, info):
+    def _rebuild_allowed_paths(self, snap):
         """Refresh the set of paths /open may reveal: the repo root plus
         every changed file that currently exists on disk."""
         allowed = {os.path.realpath(self.repo_path)}
-        for rel in (info["staged_files"] + info["modified_files"]
-                    + info["untracked_files"]):
+        for rel in (snap.staged_files + snap.modified_files
+                    + snap.untracked_files):
             p = os.path.join(self.repo_path, rel)
             if os.path.exists(p):
                 allowed.add(os.path.realpath(p))
@@ -1921,11 +1986,11 @@ def main():
         print(f"Scanning {repo_path} (range: {range_spec})...")
     else:
         print(f"Scanning {repo_path}...")
-    info = collect_repo_info(repo_path)
-    view = build_diff_view(repo_path, range_spec, info)
-    html = generate_html(info, repo_path, view)
+    snap = RepoSnapshot.from_repo(repo_path)
+    view = build_diff_view(repo_path, range_spec, snap)
+    html = generate_html(snap, repo_path, view)
 
-    safe_name = re.sub(r'[^\w\-]', '-', info["repo_name"]).strip('-')
+    safe_name = re.sub(r'[^\w\-]', '-', snap.repo_name).strip('-')
     output_path = f"/tmp/{safe_name}-git-dashboard.html"
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)

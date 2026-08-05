@@ -67,7 +67,7 @@ def test_diff_section_escapes_the_label(gd):
 
 def test_stats_row_renders_view_cards_then_stashes(gd):
     out = gd._render_stats_row(
-        {"stash_count": 2},
+        gd.RepoSnapshot(stash_count=2),
         gd.DiffView(stat_cards=[
             ("Files Changed", "modified", 3, "3"),
             ("Insertions", "staged", 9, "+9"),
@@ -82,7 +82,7 @@ def test_stats_row_renders_view_cards_then_stashes(gd):
 
 
 def test_stats_row_dims_a_zero_stash_count(gd):
-    out = gd._render_stats_row({"stash_count": 0}, gd.DiffView())
+    out = gd._render_stats_row(gd.RepoSnapshot(stash_count=0), gd.DiffView())
     assert '<div class="stat-value zero">0</div>' in out
 
 
@@ -93,8 +93,8 @@ def test_working_tree_view_has_both_sections(gd, repo, git):
     (repo / "b.txt").write_text("staged line\n")
     git("add", "b.txt", cwd=repo)                      # staged
 
-    info = gd.collect_repo_info(str(repo))
-    view = gd.WorkingTreeDiffs(str(repo), info)
+    snap = gd.RepoSnapshot.from_repo(str(repo))
+    view = gd.WorkingTreeDiffs(str(repo), snap)
 
     labels = [label for label, _ in view.sections]
     assert labels == ["Staged Changes (1 file)", "Unstaged Changes (1 file)"]
@@ -104,8 +104,8 @@ def test_working_tree_view_has_both_sections(gd, repo, git):
 
 
 def test_clean_working_tree_view_is_empty(gd, repo):
-    info = gd.collect_repo_info(str(repo))
-    view = gd.WorkingTreeDiffs(str(repo), info)
+    snap = gd.RepoSnapshot.from_repo(str(repo))
+    view = gd.WorkingTreeDiffs(str(repo), snap)
 
     assert view.sections == []
     assert view.empty_message == "No uncommitted changes to diff"
@@ -141,21 +141,21 @@ def test_empty_range_reports_no_changes(gd, repo):
 # ─── build_diff_view: the one place mode is decided ─────────────────
 
 def test_build_diff_view_picks_the_adapter(gd, repo):
-    info = gd.collect_repo_info(str(repo))
-    assert isinstance(gd.build_diff_view(str(repo), None, info),
+    snap = gd.RepoSnapshot.from_repo(str(repo))
+    assert isinstance(gd.build_diff_view(str(repo), None, snap),
                       gd.WorkingTreeDiffs)
-    assert isinstance(gd.build_diff_view(str(repo), "HEAD~1..HEAD", info),
+    assert isinstance(gd.build_diff_view(str(repo), "HEAD~1..HEAD", snap),
                       gd.RangeDiffs)
 
 
 def test_generate_html_runs_no_git(gd, repo, monkeypatch):
     """The renderer is pure: every git call happens in the adapter, before
     generate_html is ever entered."""
-    info = gd.collect_repo_info(str(repo))
-    view = gd.build_diff_view(str(repo), None, info)
+    snap = gd.RepoSnapshot.from_repo(str(repo))
+    view = gd.build_diff_view(str(repo), None, snap)
 
     def _fail(args, cwd):
         raise AssertionError(f"generate_html invoked git: {args}")
 
     monkeypatch.setattr(gd, "run_git", _fail)
-    assert "<html" in gd.generate_html(info, str(repo), view)
+    assert "<html" in gd.generate_html(snap, str(repo), view)

@@ -18,12 +18,12 @@ def test_module_loads_without_side_effects(gd):
     for name in (
         "run_git",
         "find_default_ref",
-        "collect_repo_info",
         "compute_state_hash",
         "parse_args",
         "generate_html",
     ):
         assert callable(getattr(gd, name))
+    assert callable(gd.RepoSnapshot.from_repo)
     assert isinstance(gd.HELP_TEXT, str) and gd.HELP_TEXT
 
 

@@ -12,7 +12,7 @@ Two jobs:
 2. Build hermetic, deterministic git repositories. Every test runs with the
    sandbox's global/system git config masked, a fixed author/committer
    identity, and fixed dates. "Remote" scenarios use a local bare repository
-   in tmp_path — nothing ever touches the network (``collect_repo_info``
+   in tmp_path — nothing ever touches the network (snapshotting a repo
    runs ``git fetch``, so a real remote URL would hang the suite).
 
 Test setup drives git via subprocess directly (``_git``), never through the

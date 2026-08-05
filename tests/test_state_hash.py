@@ -118,18 +118,22 @@ def test_hash_changes_when_default_branch_moves(gd, origin_setup, commit, git):
 
 def test_remote_change_shows_up_end_to_end(gd, origin_setup, commit, git):
     # The motivating scenario: work appears "in another session" (clone B
-    # pushes to origin). The dashboard must notice: collect_repo_info's own
-    # fetch flips the sync status to Behind, and the state hash — the poll
+    # pushes to origin). The dashboard must notice: the snapshot's own fetch
+    # flips the branch panel to "behind", and the state hash — the poll
     # loop's refresh trigger — changes.
-    info = gd.collect_repo_info(str(origin_setup.repo))
-    assert info["sync_status"] == "In sync"
+    def branch_panel(snap):
+        return gd._render_branch_panel(snap, gd._render_commits(snap, ""))
+
+    snap = gd.RepoSnapshot.from_repo(str(origin_setup.repo))
+    assert (snap.ahead, snap.behind) == (0, 0)
+    assert "In sync" in branch_panel(snap)
     h_before = gd.compute_state_hash(str(origin_setup.repo))
 
     commit(origin_setup.other, "collab.txt", "from another session\n",
            "collaborator commit")
     git("push", "-q", "origin", "main", cwd=origin_setup.other)
 
-    info = gd.collect_repo_info(str(origin_setup.repo))  # fetches internally
-    assert info["behind"] >= 1
-    assert info["sync_status"] == "Behind"
+    snap = gd.RepoSnapshot.from_repo(str(origin_setup.repo))  # fetches internally
+    assert snap.behind >= 1
+    assert "↓ 1 behind" in branch_panel(snap)
     assert gd.compute_state_hash(str(origin_setup.repo)) != h_before

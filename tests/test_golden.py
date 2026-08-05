@@ -12,14 +12,15 @@ RE-BLESSING (after an *intentional* output change):
 then review the diff of tests/golden/*.html before committing. Never
 re-bless to silence a failure you can't explain.
 
-Determinism — three non-deterministic sources are neutralized:
+Determinism — three non-deterministic sources are neutralized, the first
+two by deriving a pinned snapshot with dataclasses.replace (RepoSnapshot is
+frozen, and both facts are its named fields — no monkeypatching):
 
 1. git's %ar relative dates ("6 years ago" drifts with the wall clock, and
-   Python-side clock freezing can't reach the git subprocess): every
-   relative-date field in the info dict is overwritten with a fixed string
-   before rendering (_scrub_relative_dates).
-2. datetime.now() inside generate_html (the "Generated ..." header stamp):
-   the module's datetime class is monkeypatched to a frozen one.
+   Python-side clock freezing can't reach the git subprocess): every Commit
+   is replaced with one carrying a fixed date (_pin_snapshot).
+2. The "Generated ..." header stamp: generate_html reads it from
+   snap.generated_at rather than the clock, so _pin_snapshot fixes it too.
 3. The absolute repo path (generate_html embeds str(repo_path) in the
    "Path:" header line, and pytest's tmp_path differs every run — a third
    source beyond the two the brief listed; see FINDINGS.md): the path is
@@ -35,51 +36,39 @@ hashes alone after a git upgrade, re-bless and review.)
 """
 
 import os
+from dataclasses import replace
 from datetime import datetime
 from html import escape
 from pathlib import Path
-
-import pytest
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
 # Fixed stand-in for git's wall-clock-relative %ar dates.
 FIXED_RELATIVE_DATE = "some time ago"
 
-
-class _FrozenDatetime(datetime):
-    """A datetime whose now() is pinned to a constant instant."""
-
-    @classmethod
-    def now(cls, tz=None):
-        return cls(2020, 6, 15, 12, 0, 0)
+# Fixed instant for the "Generated ..." header stamp.
+FIXED_INSTANT = datetime(2020, 6, 15, 12, 0, 0)
 
 
-@pytest.fixture
-def frozen_clock(gd, monkeypatch):
-    """Pin the 'Generated ...' timestamp generate_html stamps into the HTML."""
-    monkeypatch.setattr(gd, "datetime", _FrozenDatetime)
+def _pin_snapshot(snap):
+    """Derive a snapshot with every clock-relative fact pinned: the render
+    timestamp, and each commit's %ar date."""
+    def pin_dates(commits):
+        return [replace(c, date=FIXED_RELATIVE_DATE) for c in commits]
 
-
-def _scrub_relative_dates(info):
-    """Overwrite every %ar-derived field with a fixed string.
-
-    last_date isn't currently rendered by generate_html, but it is scrubbed
-    anyway so the info dict holds nothing clock-relative.
-    """
-    info["last_date"] = FIXED_RELATIVE_DATE
-    for c in info["recent_commits"]:
-        c["date"] = FIXED_RELATIVE_DATE
-    for c in info["main_recent_commits"]:
-        c["date"] = FIXED_RELATIVE_DATE
-    return info
+    return replace(
+        snap,
+        generated_at=FIXED_INSTANT,
+        recent_commits=pin_dates(snap.recent_commits),
+        main_recent_commits=pin_dates(snap.main_recent_commits),
+    )
 
 
 def _render(gd, repo):
-    """collect + scrub + render + placeholder the per-run repo path."""
-    info = _scrub_relative_dates(gd.collect_repo_info(str(repo)))
-    view = gd.build_diff_view(str(repo), None, info)
-    html_out = gd.generate_html(info, str(repo), view)
+    """snapshot + pin + render + placeholder the per-run repo path."""
+    snap = _pin_snapshot(gd.RepoSnapshot.from_repo(str(repo)))
+    view = gd.build_diff_view(str(repo), None, snap)
+    html_out = gd.generate_html(snap, str(repo), view)
     return html_out.replace(escape(str(repo)), "{{REPO_PATH}}")
 
 
@@ -101,7 +90,7 @@ def _assert_matches_golden(name, html_out):
 
 # ─── Scenario 1: clean repo ─────────────────────────────────────────
 
-def test_golden_clean_repo(gd, git, commit, tmp_path, frozen_clock):
+def test_golden_clean_repo(gd, git, commit, tmp_path):
     repo = tmp_path / "golden-clean"
     repo.mkdir()
     git("init", "-q", "-b", "main", cwd=repo)
@@ -112,7 +101,7 @@ def test_golden_clean_repo(gd, git, commit, tmp_path, frozen_clock):
 
 # ─── Scenario 2: staged + modified + untracked, diffs rendered ──────
 
-def test_golden_dirty_repo(gd, git, commit, tmp_path, frozen_clock):
+def test_golden_dirty_repo(gd, git, commit, tmp_path):
     repo = tmp_path / "golden-dirty"
     repo.mkdir()
     git("init", "-q", "-b", "main", cwd=repo)
@@ -129,8 +118,7 @@ def test_golden_dirty_repo(gd, git, commit, tmp_path, frozen_clock):
 
 # ─── Scenario 3: feature branch, bottom "main" card shown ───────────
 
-def test_golden_feature_branch_with_main_card(gd, git, commit, tmp_path,
-                                              frozen_clock):
+def test_golden_feature_branch_with_main_card(gd, git, commit, tmp_path):
     repo = tmp_path / "golden-feature"
     repo.mkdir()
     git("init", "-q", "-b", "main", cwd=repo)
