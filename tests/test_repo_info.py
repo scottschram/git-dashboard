@@ -165,3 +165,55 @@ def test_collect_sync_diverged(gd, origin_setup, commit, git):
     info = gd.collect_repo_info(str(origin_setup.repo))
     assert (info["ahead"], info["behind"]) == (1, 1)
     assert info["sync_status"] == "Diverged"
+
+
+def _delete_upstream(origin_setup, git):
+    """Put clone A in the 'upstream gone' state: branch config still names
+    origin/main, but the ref no longer resolves (remote branch deleted,
+    remote-tracking ref pruned). collect_repo_info's internal fetch cannot
+    restore it — the bare repo's branch is gone too."""
+    git("update-ref", "-d", "refs/heads/main", cwd=origin_setup.bare)
+    git("update-ref", "-d", "refs/remotes/origin/main", cwd=origin_setup.repo)
+
+
+def test_collect_upstream_gone_is_not_in_sync(gd, origin_setup, commit, git):
+    # Regression: rev-list against a gone ref exits non-zero, run_git
+    # returns "", and ahead/behind read as 0/0 — which used to render a
+    # false green "In sync" over genuinely unpushed commits.
+    commit(origin_setup.repo, "local.txt", "local\n", "unpushed commit")
+    _delete_upstream(origin_setup, git)
+
+    info = gd.collect_repo_info(str(origin_setup.repo))
+    assert info["tracking"] == "origin/main"  # config survives the prune
+    assert info["tracking_gone"] is True
+    assert info["sync_status"] == "Upstream gone"
+    assert info["sync_status"] != "In sync"
+
+
+def test_collect_upstream_gone_marks_all_commits_unpushed(gd, origin_setup,
+                                                          commit, git):
+    # With the upstream ref gone, no local commit can be on it — the seed
+    # commit plus the local one both count as unpushed.
+    commit(origin_setup.repo, "local.txt", "local\n", "unpushed commit")
+    _delete_upstream(origin_setup, git)
+
+    info = gd.collect_repo_info(str(origin_setup.repo))
+    assert len(info["unpushed_hashes"]) == 2
+    assert all(c["full_hash"] in info["unpushed_hashes"]
+               for c in info["recent_commits"])
+
+
+def test_render_upstream_gone_badge(gd, origin_setup, commit, git):
+    commit(origin_setup.repo, "local.txt", "local\n", "unpushed commit")
+    _delete_upstream(origin_setup, git)
+
+    info = gd.collect_repo_info(str(origin_setup.repo))
+    panel = gd._render_branch_panel(info, gd._render_commits(info, ""))
+    assert "Upstream gone" in panel
+    assert "In sync" not in panel
+
+
+def test_collect_healthy_upstream_not_flagged_gone(gd, origin_setup):
+    info = gd.collect_repo_info(str(origin_setup.repo))
+    assert info["tracking_gone"] is False
+    assert info["sync_status"] == "In sync"

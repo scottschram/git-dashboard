@@ -144,10 +144,21 @@ def collect_repo_info(repo_path):
     # Fetch quietly for accurate ahead/behind
     run_git(["fetch", "--quiet"], repo_path)
 
+    # A branch can be *configured* to track a ref that no longer resolves —
+    # remote branch deleted and pruned, say. rev-list against a gone ref
+    # exits non-zero, run_git returns "", and 0/0 would render as a false
+    # green "In sync". Detect the state explicitly (after the fetch, which
+    # may prune or restore the ref) and report it instead.
+    info["tracking_gone"] = bool(info["tracking"]) and not run_git(
+        ["rev-parse", "--verify", "--quiet", info["tracking"]], repo_path
+    )
+
     info["ahead"] = 0
     info["behind"] = 0
     info["sync_status"] = "No remote tracking"
-    if info["tracking"]:
+    if info["tracking_gone"]:
+        info["sync_status"] = "Upstream gone"
+    elif info["tracking"]:
         ahead = run_git(["rev-list", "--count", f"{info['tracking']}..HEAD"], repo_path)
         behind = run_git(["rev-list", "--count", f"HEAD..{info['tracking']}"], repo_path)
         info["ahead"] = int(ahead) if ahead.isdigit() else 0
@@ -217,7 +228,13 @@ def collect_repo_info(repo_path):
 
     # Unpushed commit hashes (full hashes for reliable comparison)
     info["unpushed_hashes"] = set()
-    if info["tracking"]:
+    if info["tracking_gone"]:
+        # The upstream ref is gone, so no local commit can be on it —
+        # every commit counts as unpushed.
+        all_hashes = run_git(["rev-list", "HEAD"], repo_path)
+        if all_hashes:
+            info["unpushed_hashes"] = set(all_hashes.splitlines())
+    elif info["tracking"]:
         unpushed = run_git(["rev-list", f"{info['tracking']}..HEAD"], repo_path)
         if unpushed:
             info["unpushed_hashes"] = set(unpushed.splitlines())
@@ -1183,13 +1200,21 @@ def _render_branch_panel(info, commits_html):
     """Top-right panel: current-branch commits plus a sync-status badge."""
     ahead, behind = info["ahead"], info["behind"]
     sync_parts = []
-    if ahead > 0:
-        sync_parts.append(f'<span class="sync-badge sync-ahead">↑ {ahead} unpushed</span>')
-    if behind > 0:
-        sync_parts.append(f'<span class="sync-badge sync-behind">↓ {behind} behind</span>')
-    if not sync_parts and info["tracking"]:
+    if info["tracking_gone"]:
+        # Upstream configured but its ref is gone — ahead/behind are
+        # uncomputable, and 0/0 must not read as "In sync". Reuses the
+        # yellow sync-ahead style (matches the all-commits-unpushed
+        # highlighting) so DASHBOARD_CSS — embedded in the goldens —
+        # doesn't change.
+        sync_parts.append('<span class="sync-badge sync-ahead">Upstream gone</span>')
+    elif ahead > 0 or behind > 0:
+        if ahead > 0:
+            sync_parts.append(f'<span class="sync-badge sync-ahead">↑ {ahead} unpushed</span>')
+        if behind > 0:
+            sync_parts.append(f'<span class="sync-badge sync-behind">↓ {behind} behind</span>')
+    elif info["tracking"]:
         sync_parts.append('<span class="sync-badge sync-ok">In sync</span>')
-    elif not info["tracking"]:
+    else:
         sync_parts.append('<span class="sync-badge sync-notrack">No remote</span>')
     commits_header_extra = " ".join(sync_parts)
 
