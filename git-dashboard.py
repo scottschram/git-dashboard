@@ -1673,46 +1673,74 @@ def inject_watch_script(html):
     return html.replace("</body>", script, 1)
 
 
-class WatchState:
-    """Shared state between the HTTP server, SSE clients, and polling thread."""
+class DashboardCache:
+    """The rendered dashboard and the staleness rule that governs it.
+
+    Owns the HTML byte cache, the state hash that decides when to rebuild,
+    and the /open allowlist (rebuilt from the same snapshot on every
+    regenerate, so it can never describe a different repo state than the
+    page being served). Callers never see the hash — they ask
+    refresh_if_changed() or force_refresh() and read get_html().
+
+    Threading: get_html and is_allowed are called from server threads while
+    the poll thread regenerates; the html and allowed-paths locks cover
+    those. The hash is touched only by refresh_if_changed (poll thread) and
+    force_refresh (a /refresh server thread).
+    """
 
     def __init__(self, repo_path, range_spec):
         self.repo_path = repo_path
         self.range_spec = range_spec
-        self.html = b""
-        self.html_lock = threading.Lock()
-        self.clients = []           # list of queue.Queue, one per SSE client
-        self.clients_lock = threading.Lock()
-        self.last_hash = None
-        self.shutdown_event = threading.Event()
-        self.allowed_paths = set()  # realpath'd paths /open may act on
-        self.allowed_lock = threading.Lock()
+        self._html = b""
+        self._html_lock = threading.Lock()
+        self._last_hash = None
+        self._allowed_paths = set()  # realpath'd paths /open may act on
+        self._allowed_lock = threading.Lock()
 
-    def regenerate(self):
+    def refresh_if_changed(self):
+        """The whole poll-tick rule: recompute the state hash and, if it
+        differs from the last one seen, rebuild the HTML. Returns True
+        exactly when a rebuild happened (the caller notifies browsers on
+        True). The first call always rebuilds — no hash has been seen yet —
+        so this is also the initialization path."""
+        current_hash = compute_state_hash(self.repo_path)
+        if current_hash == self._last_hash:
+            return False
+        self._last_hash = current_hash
+        self._regenerate()
+        return True
+
+    def force_refresh(self):
+        """Rebuild regardless of whether the watched state changed.
+        Triggered by the header ↻ button when the user suspects the
+        dashboard is stale — e.g. a local commit on a non-tracked default
+        branch that the poll hash doesn't notice.
+
+        The hash is recomputed *after* _regenerate(), because regenerating
+        runs `git fetch` — if that pulls new commits, the upstream ref moves
+        and a pre-fetch hash would mismatch on the very next poll tick,
+        causing a spurious second refresh."""
+        self._regenerate()
+        self._last_hash = compute_state_hash(self.repo_path)
+
+    def get_html(self):
+        with self._html_lock:
+            return self._html
+
+    def is_allowed(self, abspath):
+        """True if abspath is something /open is permitted to reveal."""
+        with self._allowed_lock:
+            return abspath in self._allowed_paths
+
+    def _regenerate(self):
         """Rebuild the dashboard HTML from current repo state."""
         snap = RepoSnapshot.from_repo(self.repo_path)
         self._rebuild_allowed_paths(snap)
         view = build_diff_view(self.repo_path, self.range_spec, snap)
         html = generate_html(snap, self.repo_path, view, live=True)
         html = inject_watch_script(html)
-        with self.html_lock:
-            self.html = html.encode("utf-8")
-
-    def force_refresh(self):
-        """Re-scan and tell every client to reload, regardless of whether the
-        watched state actually changed. Triggered by the header ↻ button when
-        the user suspects the dashboard is stale — e.g. a local commit on a
-        non-tracked default branch that the poll hash doesn't notice.
-
-        last_hash is recomputed *after* regenerate(), because regenerate runs
-        `git fetch` — if that pulls new commits, the upstream ref moves and a
-        pre-fetch hash would mismatch on the very next poll tick, causing a
-        spurious second refresh."""
-        self.regenerate()
-        self.last_hash = compute_state_hash(self.repo_path)
-        self.broadcast("refresh")
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] Refreshed (manual)", flush=True)
+        with self._html_lock:
+            self._html = html.encode("utf-8")
 
     def _rebuild_allowed_paths(self, snap):
         """Refresh the set of paths /open may reveal: the repo root plus
@@ -1723,55 +1751,63 @@ class WatchState:
             p = os.path.join(self.repo_path, rel)
             if os.path.exists(p):
                 allowed.add(os.path.realpath(p))
-        with self.allowed_lock:
-            self.allowed_paths = allowed
+        with self._allowed_lock:
+            self._allowed_paths = allowed
 
-    def is_allowed(self, abspath):
-        """True if abspath is something /open is permitted to reveal."""
-        with self.allowed_lock:
-            return abspath in self.allowed_paths
 
-    def get_html(self):
-        with self.html_lock:
-            return self.html
+class ClientRegistry:
+    """SSE client fan-out: one queue per connected browser tab, plus the
+    shutdown signal that wakes them all.
+
+    add/remove/broadcast run concurrently from server threads and the poll
+    thread; the clients lock covers the list, and the queues themselves are
+    thread-safe. Messages are opaque strings except the "__shutdown__"
+    sentinel, which tells an SSE handler to close its stream."""
+
+    def __init__(self):
+        self._clients = []          # list of queue.Queue, one per SSE client
+        self._clients_lock = threading.Lock()
+        self.shutdown_event = threading.Event()
 
     def add_client(self):
         q = queue.Queue()
-        with self.clients_lock:
-            self.clients.append(q)
+        with self._clients_lock:
+            self._clients.append(q)
         return q
 
     def remove_client(self, q):
-        with self.clients_lock:
-            if q in self.clients:
-                self.clients.remove(q)
+        with self._clients_lock:
+            if q in self._clients:
+                self._clients.remove(q)
 
     def broadcast(self, message):
         """Send a message to every connected SSE client."""
-        with self.clients_lock:
-            targets = list(self.clients)
+        with self._clients_lock:
+            targets = list(self._clients)
         for q in targets:
             q.put(message)
 
+    def shutdown(self):
+        """Signal shutdown, then wake every SSE thread blocked on its queue."""
+        self.shutdown_event.set()
+        self.broadcast("__shutdown__")
 
-def poll_loop(state):
+
+def poll_loop(cache, clients):
     """
-    Background thread: every POLL_INTERVAL_SECONDS, recompute the state hash.
-    If it changed, regenerate the HTML and tell every browser tab to reload.
+    Background thread: every POLL_INTERVAL_SECONDS, ask the cache whether
+    the repo changed; on a rebuild, tell every browser tab to reload.
     """
-    while not state.shutdown_event.is_set():
+    while not clients.shutdown_event.is_set():
         try:
-            current_hash = compute_state_hash(state.repo_path)
-            if current_hash != state.last_hash:
-                state.last_hash = current_hash
-                state.regenerate()
-                state.broadcast("refresh")
+            if cache.refresh_if_changed():
+                clients.broadcast("refresh")
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 print(f"[{timestamp}] Refreshed", flush=True)
         except Exception as e:
             sys.stderr.write(f"poll error: {e}\n")
         # Sleep, but wake immediately on shutdown
-        state.shutdown_event.wait(POLL_INTERVAL_SECONDS)
+        clients.shutdown_event.wait(POLL_INTERVAL_SECONDS)
 
 
 class QuietThreadingHTTPServer(ThreadingHTTPServer):
@@ -1791,8 +1827,9 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def make_request_handler(state):
-    """Build a BaseHTTPRequestHandler subclass bound to a WatchState."""
+def make_request_handler(cache, clients):
+    """Build a BaseHTTPRequestHandler subclass bound to a DashboardCache
+    and a ClientRegistry."""
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -1807,14 +1844,17 @@ def make_request_handler(state):
             elif self.path.startswith("/open?"):
                 self._serve_open()
             elif self.path == "/refresh":
-                state.force_refresh()
+                cache.force_refresh()
+                clients.broadcast("refresh")
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"[{timestamp}] Refreshed (manual)", flush=True)
                 self.send_response(204)
                 self.end_headers()
             else:
                 self.send_error(404)
 
         def _serve_dashboard(self):
-            body = state.get_html()
+            body = cache.get_html()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -1828,12 +1868,12 @@ def make_request_handler(state):
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
-            q = state.add_client()
+            q = clients.add_client()
             try:
                 # Initial comment confirms the SSE stream is alive
                 self.wfile.write(b": connected\n\n")
                 self.wfile.flush()
-                while not state.shutdown_event.is_set():
+                while not clients.shutdown_event.is_set():
                     try:
                         msg = q.get(timeout=30)
                     except queue.Empty:
@@ -1848,20 +1888,20 @@ def make_request_handler(state):
             except (BrokenPipeError, ConnectionResetError):
                 pass  # Browser tab closed; nothing to clean up beyond removal.
             finally:
-                state.remove_client(q)
+                clients.remove_client(q)
 
         def _serve_open(self):
             """Act on an allowlisted path: reveal in Finder (open -R for a
             file, open for the repo folder), or open a terminal there
-            (app=terminal). Guarded by state.is_allowed."""
+            (app=terminal). Guarded by cache.is_allowed."""
             params = parse_qs(urlparse(self.path).query)
             rel = (params.get("path") or [""])[0]
             app = (params.get("app") or [""])[0]
             if not rel:
                 self.send_error(400)
                 return
-            abspath = os.path.realpath(os.path.join(state.repo_path, rel))
-            if not state.is_allowed(abspath):
+            abspath = os.path.realpath(os.path.join(cache.repo_path, rel))
+            if not cache.is_allowed(abspath):
                 self.send_error(403)
                 return
             if app == "terminal":
@@ -1883,18 +1923,20 @@ def make_request_handler(state):
 
 def serve_watch(repo_path, range_spec):
     """Run the watch server until the user hits Ctrl-C."""
-    state = WatchState(repo_path, range_spec)
+    cache = DashboardCache(repo_path, range_spec)
+    clients = ClientRegistry()
 
     print(f"Scanning {repo_path}...", flush=True)
-    state.last_hash = compute_state_hash(repo_path)
-    state.regenerate()
+    cache.refresh_if_changed()  # first call: builds the initial HTML
 
-    handler = make_request_handler(state)
+    handler = make_request_handler(cache, clients)
     server = QuietThreadingHTTPServer(("127.0.0.1", 0), handler)
     port = server.server_address[1]
     url = f"http://127.0.0.1:{port}/"
 
-    poll_thread = threading.Thread(target=poll_loop, args=(state,), daemon=True)
+    poll_thread = threading.Thread(
+        target=poll_loop, args=(cache, clients), daemon=True
+    )
     poll_thread.start()
 
     print(f"Dashboard: {url}", flush=True)
@@ -1906,11 +1948,7 @@ def serve_watch(repo_path, range_spec):
     except KeyboardInterrupt:
         print("\nStopping...", flush=True)
     finally:
-        state.shutdown_event.set()
-        # Wake any SSE client threads blocked on their queue
-        with state.clients_lock:
-            for q in state.clients:
-                q.put("__shutdown__")
+        clients.shutdown()  # wakes any SSE threads blocked on their queues
         server.shutdown()
         server.server_close()
 
