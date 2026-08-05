@@ -472,28 +472,36 @@ def test_render_text_diffed_svg_gets_triangle_not_image_icon(gd):
 
 
 # ─── _render_diff_section: expand/collapse-all controls ─────────────
+#
+# Every test below renders from a hand-built DiffView — no repository on
+# disk, no git — which is the point of the adapter seam.
 
 def test_diff_section_header_has_fold_controls(gd):
-    out = gd._render_diff_section(
-        False, "", "", 0, 0, 0,
-        '<details class="diff-file"></details>', "", 1, 0,
-    )
+    out = gd._render_diff_section(gd.DiffView(
+        label="Word-Level Change Detection",
+        sections=[("Staged Changes (1 file)",
+                   '<details class="diff-file"></details>')],
+    ))
     assert "Expand all" in out
     assert "Collapse all" in out
 
 
 def test_range_diff_section_header_has_fold_controls(gd):
-    out = gd._render_diff_section(
-        True, "v1..v2", '<details class="diff-file"></details>', 1, 2, 3,
-        "", "", 0, 0,
-    )
+    out = gd._render_diff_section(gd.DiffView(
+        label="v1..v2", empty_label="v1..v2",
+        sections=[("1 file changed, +2 −3",
+                   '<details class="diff-file"></details>')],
+    ))
     assert "Expand all" in out
     assert "Collapse all" in out
 
 
 def test_empty_diff_section_has_no_fold_controls(gd):
     # Nothing to fold — the controls would be dead weight on an empty panel.
-    out = gd._render_diff_section(False, "", "", 0, 0, 0, "", "", 0, 0)
+    out = gd._render_diff_section(gd.DiffView(
+        label="Word-Level Change Detection",
+        empty_message="No uncommitted changes to diff",
+    ))
     assert "Expand all" not in out
     assert "Collapse all" not in out
 

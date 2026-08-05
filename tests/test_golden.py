@@ -78,7 +78,8 @@ def _scrub_relative_dates(info):
 def _render(gd, repo):
     """collect + scrub + render + placeholder the per-run repo path."""
     info = _scrub_relative_dates(gd.collect_repo_info(str(repo)))
-    html_out = gd.generate_html(info, str(repo))
+    view = gd.build_diff_view(str(repo), None, info)
+    html_out = gd.generate_html(info, str(repo), view)
     return html_out.replace(escape(str(repo)), "{{REPO_PATH}}")
 
 

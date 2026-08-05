@@ -570,7 +570,7 @@ def parse_and_render_diff(diff_text, diff_label):
     return "\n".join(html_parts)
 
 
-# ─── HTML Generation ────────────────────────────────────────────────
+# ─── Diff Sources ───────────────────────────────────────────────────
 
 def parse_diff_stat(stat_output):
     """Parse the summary line of git diff --stat. Returns (files, insertions, deletions)."""
@@ -590,6 +590,125 @@ def parse_diff_stat(stat_output):
         deletions = int(m.group(1))
     return files, insertions, deletions
 
+
+def _plural(n, noun):
+    """"1 file" / "2 files" — the only pluralization the dashboard needs."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
+class DiffView:
+    """Everything the renderer needs to know about the diffs it is showing,
+    with no trace of where they came from.
+
+    Two adapters satisfy it — WorkingTreeDiffs (staged + unstaged) and
+    RangeDiffs (one section for a commit range). They own every git
+    invocation and the whole "is this a range?" question, which is why
+    generate_html can be pure and why tests can hand-build a view and
+    render it with no repository on disk.
+
+    Fields (all optional; the defaults describe "nothing to show"):
+
+      label          panel-header suffix when there is something to show,
+                     HTML-escaped at render time.
+      empty_label    header suffix when sections is empty; "" drops the
+                     dash entirely.
+      empty_message  panel body text when sections is empty.
+      sections       (section_label, diff_html) pairs in display order,
+                     each rendered with a divider between it and the one
+                     before. section_label is emitted as-is, so adapters
+                     must supply markup-safe text. Empty means the panel
+                     falls back to the empty state.
+      stat_cards     the leading stat cards, as (title, css_class, count,
+                     display) — count drives the "zero" styling, display
+                     is the text shown. The Stashes card is appended by
+                     the renderer; it comes from the repo, not the diff.
+    """
+
+    def __init__(self, label="", empty_label="", empty_message="",
+                 sections=(), stat_cards=()):
+        self.label = label
+        self.empty_label = empty_label
+        self.empty_message = empty_message
+        self.sections = list(sections)
+        self.stat_cards = list(stat_cards)
+
+
+class WorkingTreeDiffs(DiffView):
+    """Uncommitted work: what is staged and what is not."""
+
+    def __init__(self, repo_path, info):
+        staged_count = len(info["staged_files"])
+        modified_count = len(info["modified_files"])
+        untracked_count = len(info["untracked_files"])
+
+        sections = []
+        staged_html = parse_and_render_diff(
+            run_git(["diff", "--cached"], repo_path), "staged")
+        if staged_html:
+            sections.append(
+                (f'Staged Changes ({_plural(staged_count, "file")})',
+                 staged_html))
+        unstaged_html = parse_and_render_diff(
+            run_git(["diff"], repo_path), "unstaged")
+        if unstaged_html:
+            sections.append(
+                (f'Unstaged Changes ({_plural(modified_count, "file")})',
+                 unstaged_html))
+
+        super().__init__(
+            label="Word-Level Change Detection",
+            empty_message="No uncommitted changes to diff",
+            sections=sections,
+            stat_cards=[
+                ("Staged", "staged", staged_count, str(staged_count)),
+                ("Modified", "modified", modified_count, str(modified_count)),
+                ("Untracked", "untracked", untracked_count,
+                 str(untracked_count)),
+            ],
+        )
+
+
+class RangeDiffs(DiffView):
+    """A commit range: one section covering the whole span."""
+
+    def __init__(self, repo_path, range_spec):
+        # git diff takes both spellings the same way; only the label differs.
+        # A two-dot spec is committed changes only, a bare ref runs from that
+        # ref up to the working tree.
+        label = range_spec if ".." in range_spec else f"{range_spec}..working tree"
+        diff_html = parse_and_render_diff(
+            run_git(["diff", range_spec], repo_path), "range")
+        files, insertions, deletions = parse_diff_stat(
+            run_git(["diff", "--stat", range_spec], repo_path))
+
+        sections = []
+        if diff_html:
+            sections.append(
+                (f'{_plural(files, "file")} changed,'
+                 f' +{insertions} −{deletions}', diff_html))
+
+        super().__init__(
+            label=label,
+            empty_label=label,
+            empty_message="No changes in this range",
+            sections=sections,
+            stat_cards=[
+                ("Files Changed", "modified", files, str(files)),
+                ("Insertions", "staged", insertions, f"+{insertions}"),
+                ("Deletions", "untracked", deletions, f"−{deletions}"),
+            ],
+        )
+
+
+def build_diff_view(repo_path, range_spec, info):
+    """Pick the adapter for this run. The only place the range-vs-working-tree
+    question is asked."""
+    if range_spec is not None:
+        return RangeDiffs(repo_path, range_spec)
+    return WorkingTreeDiffs(repo_path, info)
+
+
+# ─── HTML Generation ────────────────────────────────────────────────
 
 DASHBOARD_CSS = """
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
@@ -1286,56 +1405,35 @@ def _render_main_panel(info, github_url):
     return main_panel_html
 
 
-def _render_stats_row(info, is_range, staged_count, modified_count,
-                      untracked_count, range_files, range_insertions,
-                      range_deletions):
-    """Compact stat cards — a different set for range vs working-tree mode."""
+def _render_stats_row(info, view):
+    """Compact stat cards — the view supplies the leading three, the repo
+    supplies the Stashes card that follows them."""
     def zero_class(n):
         return " zero" if n == 0 else ""
 
-    if is_range:
-        stats_row_html = f'''
-    <div class="stat-card modified">
-      <div class="stat-label">Files Changed</div>
-      <div class="stat-value{zero_class(range_files)}">{range_files}</div>
-    </div>
-    <div class="stat-card staged">
-      <div class="stat-label">Insertions</div>
-      <div class="stat-value{zero_class(range_insertions)}">+{range_insertions}</div>
-    </div>
-    <div class="stat-card untracked">
-      <div class="stat-label">Deletions</div>
-      <div class="stat-value{zero_class(range_deletions)}">−{range_deletions}</div>
-    </div>
-    <div class="stat-card stash">
-      <div class="stat-label">Stashes</div>
-      <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
-    </div>'''
-    else:
-        stats_row_html = f'''
-    <div class="stat-card staged">
-      <div class="stat-label">Staged</div>
-      <div class="stat-value{zero_class(staged_count)}">{staged_count}</div>
-    </div>
-    <div class="stat-card modified">
-      <div class="stat-label">Modified</div>
-      <div class="stat-value{zero_class(modified_count)}">{modified_count}</div>
-    </div>
-    <div class="stat-card untracked">
-      <div class="stat-label">Untracked</div>
-      <div class="stat-value{zero_class(untracked_count)}">{untracked_count}</div>
-    </div>
-    <div class="stat-card stash">
-      <div class="stat-label">Stashes</div>
-      <div class="stat-value{zero_class(info["stash_count"])}">{info["stash_count"]}</div>
-    </div>'''
-    return stats_row_html
+    cards = view.stat_cards + [
+        ("Stashes", "stash", info["stash_count"], str(info["stash_count"])),
+    ]
+    return "".join(f'''
+    <div class="stat-card {css_class}">
+      <div class="stat-label">{title}</div>
+      <div class="stat-value{zero_class(count)}">{display}</div>
+    </div>''' for title, css_class, count, display in cards)
 
 
-def _render_diff_section(is_range, range_label, range_diff_html, range_files,
-                         range_insertions, range_deletions, staged_diff_html,
-                         unstaged_diff_html, staged_count, modified_count):
-    """Full-width Diff Viewer panel — range mode or working-tree mode."""
+def _render_diff_section(view):
+    """Full-width Diff Viewer panel — one section per entry in the view."""
+    if not view.sections:
+        # Nothing to fold, so no fold controls; and the working-tree view
+        # leaves empty_label blank, which drops the header's dash too.
+        suffix = f" — {escape(view.empty_label)}" if view.empty_label else ""
+        return (
+            '<div class="panel panel-full">'
+            f'<div class="panel-header">🔍 Diff Viewer{suffix}</div>'
+            f'<div class="panel-body"><div class="panel-empty">{view.empty_message}</div></div>'
+            '</div>'
+        )
+
     fold = "document.querySelectorAll('details.diff-file').forEach(d=>d.open="
     fold_controls = (
         '<span class="diff-fold-controls">'
@@ -1343,81 +1441,24 @@ def _render_diff_section(is_range, range_label, range_diff_html, range_files,
         f'<button class="diff-fold" onclick="{fold}false)">Collapse all</button>'
         '</span>'
     )
-    diff_section = ""
-    if is_range:
-        if range_diff_html:
-            diff_section = f'<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — {escape(range_label)}{fold_controls}</div>\n'
-            diff_section += '<div class="panel-body diff-scroll">\n'
-            diff_section += f'<div class="diff-section-label">{range_files} file{"s" if range_files != 1 else ""} changed, +{range_insertions} −{range_deletions}</div>\n'
-            diff_section += range_diff_html + "\n"
-            diff_section += '</div></div>\n'
-        else:
-            diff_section = (
-                '<div class="panel panel-full">'
-                f'<div class="panel-header">🔍 Diff Viewer — {escape(range_label)}</div>'
-                '<div class="panel-body"><div class="panel-empty">No changes in this range</div></div>'
-                '</div>'
-            )
-    elif staged_diff_html or unstaged_diff_html:
-        diff_section = f'<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — Word-Level Change Detection{fold_controls}</div>\n'
-        diff_section += '<div class="panel-body diff-scroll">\n'
-
-        if staged_diff_html:
-            diff_section += f'<div class="diff-section-label">Staged Changes ({staged_count} file{"s" if staged_count != 1 else ""})</div>\n'
-            diff_section += staged_diff_html + "\n"
-
-        if staged_diff_html and unstaged_diff_html:
+    diff_section = f'<div class="panel panel-full"><div class="panel-header">🔍 Diff Viewer — {escape(view.label)}{fold_controls}</div>\n'
+    diff_section += '<div class="panel-body diff-scroll">\n'
+    for i, (section_label, section_html) in enumerate(view.sections):
+        if i:
             diff_section += '<div class="diff-divider"></div>\n'
-
-        if unstaged_diff_html:
-            diff_section += f'<div class="diff-section-label">Unstaged Changes ({modified_count} file{"s" if modified_count != 1 else ""})</div>\n'
-            diff_section += unstaged_diff_html + "\n"
-
-        diff_section += '</div></div>\n'
-    else:
-        diff_section = (
-            '<div class="panel panel-full">'
-            '<div class="panel-header">🔍 Diff Viewer</div>'
-            '<div class="panel-body"><div class="panel-empty">No uncommitted changes to diff</div></div>'
-            '</div>'
-        )
+        diff_section += f'<div class="diff-section-label">{section_label}</div>\n'
+        diff_section += section_html + "\n"
+    diff_section += '</div></div>\n'
     return diff_section
 
 
-def generate_html(info, repo_path, range_spec=None, live=False):
-    """Generate the complete dashboard HTML."""
+def generate_html(info, repo_path, view, live=False):
+    """Generate the complete dashboard HTML.
 
-    # Get raw diffs — range mode vs working tree mode
-    is_range = range_spec is not None
-    range_diff_html = ""
-    range_label = ""
-    range_files = range_insertions = range_deletions = 0
-    staged_diff_html = ""
-    unstaged_diff_html = ""
-
-    if is_range:
-        # Determine if this is a two-dot committed range or open-ended (includes working tree)
-        if ".." in range_spec:
-            # Two-dot range: committed changes only
-            range_diff = run_git(["diff", range_spec], repo_path)
-            range_stat = run_git(["diff", "--stat", range_spec], repo_path)
-            range_label = range_spec
-        else:
-            # Single ref: diff from that ref to working tree
-            range_diff = run_git(["diff", range_spec], repo_path)
-            range_stat = run_git(["diff", "--stat", range_spec], repo_path)
-            range_label = f"{range_spec}..working tree"
-        range_diff_html = parse_and_render_diff(range_diff, "range")
-        range_files, range_insertions, range_deletions = parse_diff_stat(range_stat)
-    else:
-        staged_diff = run_git(["diff", "--cached"], repo_path)
-        unstaged_diff = run_git(["diff"], repo_path)
-        staged_diff_html = parse_and_render_diff(staged_diff, "staged")
-        unstaged_diff_html = parse_and_render_diff(unstaged_diff, "unstaged")
-
-    staged_count = len(info["staged_files"])
-    modified_count = len(info["modified_files"])
-    untracked_count = len(info["untracked_files"])
+    Pure: every diff and stat comes in through `view` (a DiffView), so this
+    runs no git and knows nothing about range vs working-tree mode.
+    repo_path is display material — the header path and the reveal links.
+    """
     github_url = info["github_url"]
 
     # Assemble the page fragments, then fill the page template.
@@ -1428,15 +1469,8 @@ def generate_html(info, repo_path, range_spec=None, live=False):
     right_column_html = (
         f'<div class="right-stack">{branch_panel_html}{main_panel_html}</div>'
     )
-    diff_section = _render_diff_section(
-        is_range, range_label, range_diff_html, range_files, range_insertions,
-        range_deletions, staged_diff_html, unstaged_diff_html, staged_count,
-        modified_count,
-    )
-    stats_row_html = _render_stats_row(
-        info, is_range, staged_count, modified_count, untracked_count,
-        range_files, range_insertions, range_deletions,
-    )
+    diff_section = _render_diff_section(view)
+    stats_row_html = _render_stats_row(info, view)
 
     now = datetime.now().strftime("%B %d, %Y at %I:%M:%S %p")
 
@@ -1593,8 +1627,8 @@ class WatchState:
         """Rebuild the dashboard HTML from current repo state."""
         info = collect_repo_info(self.repo_path)
         self._rebuild_allowed_paths(info)
-        html = generate_html(info, self.repo_path,
-                             range_spec=self.range_spec, live=True)
+        view = build_diff_view(self.repo_path, self.range_spec, info)
+        html = generate_html(info, self.repo_path, view, live=True)
         html = inject_watch_script(html)
         with self.html_lock:
             self.html = html.encode("utf-8")
@@ -1888,7 +1922,8 @@ def main():
     else:
         print(f"Scanning {repo_path}...")
     info = collect_repo_info(repo_path)
-    html = generate_html(info, repo_path, range_spec=range_spec)
+    view = build_diff_view(repo_path, range_spec, info)
+    html = generate_html(info, repo_path, view)
 
     safe_name = re.sub(r'[^\w\-]', '-', info["repo_name"]).strip('-')
     output_path = f"/tmp/{safe_name}-git-dashboard.html"
